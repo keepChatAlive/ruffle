@@ -10,10 +10,20 @@ update-ruffle = Aktualizovat Ruffle
 ruffle-demo = Web Demo
 ruffle-desktop = Desktopová aplikace
 ruffle-wiki = Zobrazit Ruffle Wiki
-enable-hardware-acceleration = Zdá se, že hardwarová akcelerace není povolena. I když Ruffle funguje správně, může být nepřiměřeně pomalý. Jak povolit hardwarovou akceleraci zjistíte na tomto odkazu.
+enable-hardware-acceleration = Zdá se, že hardwarová akcelerace je vypnutá. I když Ruffle funguje správně, může být nepřiměřeně pomalý. Jak povolit hardwarovou akceleraci zjistíte na tomto odkazu:
+enable-hardware-acceleration-link = Časté dotazy - Hardwarová akcelerace Chrome
 view-error-details = Zobrazit podrobnosti o chybě
 open-in-new-tab = Otevřít na nové kartě
 click-to-unmute = Kliknutím zrušíte ztlumení
+clipboard-message-title = Kopírování a vkládání v Ruffle
+clipboard-message-description =
+    { $variant ->
+       *[unsupported] Váš prohlížeč nepodporuje plný přístup ke schránce,
+        [access-denied] Přístup ke schránce byl odepřen,
+    } ale místo toho můžete vždy použít tyto zkratky:
+clipboard-message-copy = { " " } pro kopírování
+clipboard-message-cut = { " " } pro vystřihování
+clipboard-message-paste = { " " } pro vkládání
 error-file-protocol =
     Zdá se, že používáte Ruffle na protokolu "file:".
     To není možné, protože prohlížeče blokují fungování mnoha funkcí z bezpečnostních důvodů.

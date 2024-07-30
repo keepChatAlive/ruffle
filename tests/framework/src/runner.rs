@@ -9,8 +9,8 @@ use anyhow::{anyhow, Result};
 use image::ImageFormat;
 use pretty_assertions::Comparison;
 use ruffle_core::backend::navigator::NullExecutor;
-use ruffle_core::events::MouseButton as RuffleMouseButton;
 use ruffle_core::events::{KeyCode, TextControlCode as RuffleTextControlCode};
+use ruffle_core::events::{MouseButton as RuffleMouseButton, MouseWheelDelta};
 use ruffle_core::limits::ExecutionLimit;
 use ruffle_core::tag_utils::SwfMovie;
 use ruffle_core::{Player, PlayerBuilder, PlayerEvent};
@@ -197,17 +197,16 @@ impl TestRunner {
         }
 
         self.injector.next(|evt, _btns_down| {
+            let mut player = self.player.lock().unwrap();
             if let AutomatedEvent::SetClipboardText { text } = evt {
-                self.player
-                    .lock()
-                    .unwrap()
-                    .ui_mut()
-                    .set_clipboard_content(text.to_owned());
+                player.ui_mut().set_clipboard_content(text.to_owned());
                 return;
             }
 
-            self.player.lock().unwrap().handle_event(match evt {
-                AutomatedEvent::MouseDown { pos, btn } => PlayerEvent::MouseDown {
+            let handled = player.handle_event(match evt {
+                AutomatedEvent::MouseDown {
+                    pos, btn, index, ..
+                } => PlayerEvent::MouseDown {
                     x: pos.0,
                     y: pos.1,
                     button: match btn {
@@ -215,6 +214,9 @@ impl TestRunner {
                         InputMouseButton::Middle => RuffleMouseButton::Middle,
                         InputMouseButton::Right => RuffleMouseButton::Right,
                     },
+                    // None here means that the core will compute index automatically,
+                    // however we do not want that in tests.
+                    index: Some(index.unwrap_or_default()),
                 },
                 AutomatedEvent::MouseMove { pos } => PlayerEvent::MouseMove { x: pos.0, y: pos.1 },
                 AutomatedEvent::MouseUp { pos, btn } => PlayerEvent::MouseUp {
@@ -224,6 +226,13 @@ impl TestRunner {
                         InputMouseButton::Left => RuffleMouseButton::Left,
                         InputMouseButton::Middle => RuffleMouseButton::Middle,
                         InputMouseButton::Right => RuffleMouseButton::Right,
+                    },
+                },
+                AutomatedEvent::MouseWheel { lines, pixels } => PlayerEvent::MouseWheel {
+                    delta: match (lines, pixels) {
+                        (Some(lines), None) => MouseWheelDelta::Lines(*lines),
+                        (None, Some(pixels)) => MouseWheelDelta::Pixels(*pixels),
+                        _ => panic!("MouseWheel: expected only one of 'lines' or 'pixels'"),
                     },
                 },
                 AutomatedEvent::KeyDown { key_code } => PlayerEvent::KeyDown {
@@ -280,8 +289,29 @@ impl TestRunner {
                         InputTextControlCode::Delete => RuffleTextControlCode::Delete,
                     },
                 },
+                AutomatedEvent::FocusGained => PlayerEvent::FocusGained,
+                AutomatedEvent::FocusLost => PlayerEvent::FocusLost,
                 AutomatedEvent::Wait | AutomatedEvent::SetClipboardText { .. } => unreachable!(),
             });
+
+            #[allow(clippy::single_match)]
+            match evt {
+                AutomatedEvent::MouseDown {
+                    assert_handled: Some(assert_handled),
+                    ..
+                } => {
+                    if handled != assert_handled.value {
+                        panic!(
+                            "Event handled status assertion failed: \n\
+                            \x20   expected to be handled: {}\n\
+                            \x20   was handled: {}\n\
+                            \x20   message: {}",
+                            assert_handled.value, handled, assert_handled.message
+                        );
+                    }
+                }
+                _ => {}
+            }
         });
         // Rendering has side-effects (such as processing 'DisplayObject.scrollRect' updates)
         self.player.lock().unwrap().render();

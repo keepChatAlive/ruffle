@@ -122,7 +122,7 @@ pub struct UpdateContext<'a, 'gc> {
     pub audio_manager: &'a mut AudioManager<'gc>,
 
     /// The navigator backend, used by the AVM to make HTTP requests and visit webpages.
-    pub navigator: &'a mut (dyn NavigatorBackend + 'a),
+    pub navigator: &'a mut dyn NavigatorBackend,
 
     /// The renderer, used by the display objects to draw themselves.
     pub renderer: &'a mut dyn RenderBackend,
@@ -673,7 +673,7 @@ impl<'a, 'gc> RenderContext<'a, 'gc> {
         // Top
         self.commands.draw_rect(
             color,
-            Matrix::create_box(width, thickness_pixels, 0.0, bounds.x_min, bounds.y_min),
+            Matrix::create_box(width, thickness_pixels, bounds.x_min, bounds.y_min),
         );
         // Bottom
         self.commands.draw_rect(
@@ -681,7 +681,6 @@ impl<'a, 'gc> RenderContext<'a, 'gc> {
             Matrix::create_box(
                 width,
                 thickness_pixels,
-                0.0,
                 bounds.x_min,
                 bounds.y_max - thickness,
             ),
@@ -689,7 +688,7 @@ impl<'a, 'gc> RenderContext<'a, 'gc> {
         // Left
         self.commands.draw_rect(
             color,
-            Matrix::create_box(thickness_pixels, height, 0.0, bounds.x_min, bounds.y_min),
+            Matrix::create_box(thickness_pixels, height, bounds.x_min, bounds.y_min),
         );
         // Right
         self.commands.draw_rect(
@@ -697,7 +696,6 @@ impl<'a, 'gc> RenderContext<'a, 'gc> {
             Matrix::create_box(
                 thickness_pixels,
                 height,
-                0.0,
                 bounds.x_max - thickness,
                 bounds.y_min,
             ),

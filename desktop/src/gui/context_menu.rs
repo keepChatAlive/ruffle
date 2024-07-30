@@ -3,20 +3,26 @@ use egui::{
     vec2, Align, Area, Button, Checkbox, Color32, Frame, Id, Key, Layout, Modifiers, Order, Pos2,
     Stroke, Style, Widget,
 };
-use ruffle_core::ContextMenuItem;
+use ruffle_core::{ContextMenuItem, PlayerEvent};
 use winit::event_loop::EventLoopProxy;
 
 pub struct ContextMenu {
     items: Vec<ContextMenuItem>,
     position: Option<Pos2>,
+    close_event: PlayerEvent,
 }
 
 impl ContextMenu {
-    pub fn new(items: Vec<ContextMenuItem>) -> Self {
+    pub fn new(items: Vec<ContextMenuItem>, close_event: PlayerEvent) -> Self {
         Self {
             items,
             position: None,
+            close_event,
         }
+    }
+
+    pub fn close_event(&self) -> PlayerEvent {
+        self.close_event
     }
 
     pub fn show(
@@ -44,7 +50,8 @@ impl ContextMenu {
                             let clicked = if item.checked {
                                 Checkbox::new(&mut true, &item.caption).ui(ui).clicked()
                             } else {
-                                let button = Button::new(&item.caption).wrap(false);
+                                let button = Button::new(&item.caption)
+                                    .wrap_mode(egui::TextWrapMode::Extend);
 
                                 ui.add_enabled(item.enabled, button).clicked()
                             };

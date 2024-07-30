@@ -4,8 +4,9 @@ use crate::loader::Error;
 use crate::socket::{ConnectionState, SocketAction, SocketHandle};
 use crate::string::WStr;
 use async_channel::{Receiver, Sender};
+use downcast_rs::Downcast;
+use encoding_rs::Encoding;
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt;
 use std::fmt::Display;
@@ -57,18 +58,19 @@ pub enum SocketMode {
 
 /// The handling mode of links opening a new website.
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum OpenURLMode {
     /// Allow all links to open a new website.
-    #[serde(rename = "allow")]
+    #[cfg_attr(feature = "serde", serde(rename = "allow"))]
     Allow,
 
     /// A confirmation dialog opens with every link trying to open a new website.
-    #[serde(rename = "confirm")]
+    #[cfg_attr(feature = "serde", serde(rename = "confirm"))]
     Confirm,
 
     /// Deny all links to open a new website.
-    #[serde(rename = "deny")]
+    #[cfg_attr(feature = "serde", serde(rename = "deny"))]
     Deny,
 }
 
@@ -197,6 +199,9 @@ pub trait SuccessResponse {
     /// This method consumes the response.
     fn body(self: Box<Self>) -> OwnedFuture<Vec<u8>, Error>;
 
+    /// The text encoding listed in the HTTP response header if existing.
+    fn text_encoding(&self) -> Option<&'static Encoding>;
+
     /// The status code of the response.
     fn status(&self) -> u16;
 
@@ -240,7 +245,7 @@ pub struct ErrorResponse {
 pub type OwnedFuture<T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + 'static>>;
 
 /// A backend interacting with a browser environment.
-pub trait NavigatorBackend {
+pub trait NavigatorBackend: Downcast {
     /// Cause a browser navigation to a given URL.
     ///
     /// The URL given may be any URL scheme a browser can support. This may not
@@ -315,6 +320,7 @@ pub trait NavigatorBackend {
         sender: Sender<SocketAction>,
     );
 }
+impl_downcast!(NavigatorBackend);
 
 #[cfg(not(target_family = "wasm"))]
 pub struct NullExecutor(futures::executor::LocalPool);
@@ -589,6 +595,10 @@ pub fn fetch_path<NavigatorType: NavigatorBackend>(
             })
         }
 
+        fn text_encoding(&self) -> Option<&'static Encoding> {
+            None
+        }
+
         fn status(&self) -> u16 {
             self.status
         }
@@ -681,4 +691,14 @@ pub fn fetch_path<NavigatorType: NavigatorBackend>(
 
         Ok(response)
     })
+}
+
+/// Parses and returns the encoding out of an HTTP header content type string
+/// if existing.
+pub fn get_encoding(content_type: &str) -> Option<&'static Encoding> {
+    if let Some((_, encoding_string)) = content_type.split_once("charset=") {
+        Encoding::for_label(encoding_string.as_bytes())
+    } else {
+        None
+    }
 }

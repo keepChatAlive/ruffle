@@ -1,9 +1,10 @@
 use crate::avm2::class::Class;
 use crate::avm2::multiname::Multiname;
+use crate::avm2::script::Script;
 use crate::string::AvmAtom;
 
 use gc_arena::{Collect, Gc};
-use swf::avm2::types::{Class as AbcClass, Exception, Index, LookupSwitch, Method, Namespace};
+use swf::avm2::types::{Exception, Index, LookupSwitch, Method, Namespace};
 
 #[derive(Clone, Collect, Debug)]
 #[collect(no_drop)]
@@ -68,13 +69,19 @@ pub enum Op<'gc> {
     Coerce {
         class: Class<'gc>,
     },
+    CoerceSwapPop {
+        class: Class<'gc>,
+    },
     CoerceA,
     CoerceB,
     CoerceD,
+    CoerceDSwapPop,
     CoerceI,
+    CoerceISwapPop,
     CoerceO,
     CoerceS,
     CoerceU,
+    CoerceUSwapPop,
     Construct {
         num_args: u32,
     },
@@ -132,10 +139,8 @@ pub enum Op<'gc> {
     },
     GetGlobalScope,
     GetGlobalSlot {
+        // note: 0-indexed, as opposed to FP.
         index: u32,
-    },
-    GetLex {
-        multiname: Gc<'gc, Multiname<'gc>>,
     },
     GetLocal {
         index: u32,
@@ -149,7 +154,11 @@ pub enum Op<'gc> {
     GetScopeObject {
         index: u8,
     },
+    GetScriptGlobals {
+        script: Script<'gc>,
+    },
     GetSlot {
+        // note: 0-indexed, as opposed to FP.
         index: u32,
     },
     GetSuper {
@@ -250,8 +259,7 @@ pub enum Op<'gc> {
         index: Index<Exception>,
     },
     NewClass {
-        #[collect(require_static)]
-        index: Index<AbcClass>,
+        class: Class<'gc>,
     },
     NewFunction {
         #[collect(require_static)]
@@ -300,6 +308,7 @@ pub enum Op<'gc> {
     ReturnVoid,
     RShift,
     SetGlobalSlot {
+        // note: 0-indexed, as opposed to FP.
         index: u32,
     },
     SetLocal {
@@ -309,9 +318,11 @@ pub enum Op<'gc> {
         multiname: Gc<'gc, Multiname<'gc>>,
     },
     SetSlot {
+        // note: 0-indexed, as opposed to FP.
         index: u32,
     },
     SetSlotNoCoerce {
+        // note: 0-indexed, as opposed to FP.
         index: u32,
     },
     SetSuper {

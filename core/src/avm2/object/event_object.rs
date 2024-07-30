@@ -9,7 +9,7 @@ use crate::avm2::Error;
 use crate::context::UpdateContext;
 use crate::display_object::TDisplayObject;
 use crate::display_object::{DisplayObject, InteractiveObject, TInteractiveObject};
-use crate::events::KeyCode;
+use crate::events::{KeyCode, MouseButton};
 use crate::string::AvmString;
 use gc_arena::{Collect, GcCell, GcWeakCell, Mutation};
 use std::cell::{Ref, RefMut};
@@ -100,6 +100,7 @@ impl<'gc> EventObject<'gc> {
         related_object: Option<InteractiveObject<'gc>>,
         delta: i32,
         bubbles: bool,
+        button: MouseButton,
     ) -> Object<'gc>
     where
         S: Into<AvmString<'gc>>,
@@ -137,12 +138,75 @@ impl<'gc> EventObject<'gc> {
                     // shiftKey
                     activation.context.input.is_key_down(KeyCode::Shift).into(),
                     // buttonDown
-                    activation.context.input.is_mouse_down().into(),
+                    activation.context.input.is_key_down(button.into()).into(),
                     // delta
                     delta.into(),
                 ],
             )
             .unwrap() // we don't expect to break here
+    }
+
+    pub fn mouse_event_down(
+        activation: &mut Activation<'_, 'gc>,
+        target: DisplayObject<'gc>,
+        button: MouseButton,
+    ) -> Object<'gc> {
+        Self::mouse_event(
+            activation,
+            match button {
+                MouseButton::Left => "mouseDown",
+                MouseButton::Right => "rightMouseDown",
+                MouseButton::Middle => "middleMouseDown",
+                MouseButton::Unknown => unreachable!(),
+            },
+            target,
+            None,
+            0,
+            true,
+            button,
+        )
+    }
+
+    pub fn mouse_event_up(
+        activation: &mut Activation<'_, 'gc>,
+        target: DisplayObject<'gc>,
+        button: MouseButton,
+    ) -> Object<'gc> {
+        Self::mouse_event(
+            activation,
+            match button {
+                MouseButton::Left => "mouseUp",
+                MouseButton::Right => "rightMouseUp",
+                MouseButton::Middle => "middleMouseUp",
+                MouseButton::Unknown => unreachable!(),
+            },
+            target,
+            None,
+            0,
+            true,
+            button,
+        )
+    }
+
+    pub fn mouse_event_click(
+        activation: &mut Activation<'_, 'gc>,
+        target: DisplayObject<'gc>,
+        button: MouseButton,
+    ) -> Object<'gc> {
+        Self::mouse_event(
+            activation,
+            match button {
+                MouseButton::Left => "click",
+                MouseButton::Right => "rightClick",
+                MouseButton::Middle => "middleClick",
+                MouseButton::Unknown => unreachable!(),
+            },
+            target,
+            None,
+            0,
+            true,
+            button,
+        )
     }
 
     pub fn text_event<S>(
@@ -242,6 +306,38 @@ impl<'gc> EventObject<'gc> {
                 ],
             )
             .unwrap() // we don't expect to break here
+    }
+
+    pub fn focus_event<S>(
+        activation: &mut Activation<'_, 'gc>,
+        event_type: S,
+        cancelable: bool,
+        related_object: Option<InteractiveObject<'gc>>,
+        key_code: u8,
+    ) -> Object<'gc>
+    where
+        S: Into<AvmString<'gc>>,
+    {
+        let event_type: AvmString<'gc> = event_type.into();
+        let shift_key = activation.context.input.is_key_down(KeyCode::Shift);
+
+        let class = activation.avm2().classes().focusevent;
+        class
+            .construct(
+                activation,
+                &[
+                    event_type.into(),
+                    true.into(),
+                    cancelable.into(),
+                    related_object
+                        .map(|o| o.as_displayobject().object2())
+                        .unwrap_or(Value::Null),
+                    shift_key.into(),
+                    key_code.into(),
+                    "none".into(), // TODO implement direction
+                ],
+            )
+            .unwrap()
     }
 }
 

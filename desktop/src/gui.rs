@@ -7,7 +7,6 @@ mod widgets;
 
 pub use controller::GuiController;
 pub use movie::MovieView;
-use ruffle_frontend_utils::recents::Recent;
 use std::borrow::Cow;
 use url::Url;
 
@@ -22,10 +21,10 @@ use fluent_templates::{static_loader, Loader};
 use menu_bar::MenuBar;
 use rfd::FileDialog;
 use ruffle_core::debug_ui::Message as DebugMessage;
-use ruffle_core::Player;
+use ruffle_core::{Player, PlayerEvent};
 use std::collections::HashMap;
-use std::fs;
 use std::sync::MutexGuard;
+use std::{fs, mem};
 use unic_langid::LanguageIdentifier;
 use winit::event_loop::EventLoopProxy;
 
@@ -158,18 +157,28 @@ impl RuffleGui {
                     }
                 });
             }
-        };
 
-        if let Some(context_menu) = &mut self.context_menu {
-            if !context_menu.show(egui_ctx, &self.event_loop) {
-                self.context_menu = None;
+            if let Some(context_menu) = &mut self.context_menu {
+                if !context_menu.show(egui_ctx, &self.event_loop) {
+                    self.close_context_menu(player);
+                }
             }
+        };
+    }
+
+    pub fn show_context_menu(
+        &mut self,
+        menu: Vec<ruffle_core::ContextMenuItem>,
+        close_event: PlayerEvent,
+    ) {
+        if !menu.is_empty() {
+            self.context_menu = Some(ContextMenu::new(menu, close_event));
         }
     }
 
-    pub fn show_context_menu(&mut self, menu: Vec<ruffle_core::ContextMenuItem>) {
-        if !menu.is_empty() {
-            self.context_menu = Some(ContextMenu::new(menu));
+    pub fn close_context_menu(&mut self, player: &mut Player) {
+        if let Some(context_menu) = mem::take(&mut self.context_menu) {
+            player.handle_event(context_menu.close_event());
         }
     }
 
@@ -185,17 +194,6 @@ impl RuffleGui {
         mut player: MutexGuard<Player>,
     ) {
         self.menu_bar.currently_opened = Some((movie_url.clone(), opt.clone()));
-        let recent_limit = self.preferences.recent_limit();
-        if let Err(e) = self.preferences.write_recents(|writer| {
-            writer.push(
-                Recent {
-                    url: movie_url.clone(),
-                },
-                recent_limit,
-            )
-        }) {
-            tracing::warn!("Couldn't update recents: {e}");
-        }
 
         // Update dialog state to reflect the newly-opened movie's options.
         self.dialogs

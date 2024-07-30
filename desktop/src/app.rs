@@ -36,7 +36,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(preferences: GlobalPreferences) -> Result<Self, Error> {
+    pub async fn new(preferences: GlobalPreferences) -> Result<Self, Error> {
         let movie_url = preferences.cli.movie_url.clone();
         let icon_bytes = include_bytes!("../assets/favicon-32.rgba");
         let icon =
@@ -70,7 +70,8 @@ impl App {
             &font_database,
             movie_url.clone(),
             no_gui,
-        )?;
+        )
+        .await?;
 
         let mut player = PlayerController::new(
             event_loop.create_proxy(),
@@ -235,6 +236,12 @@ impl App {
                                 );
                             }
                         }
+                        WindowEvent::Focused(true) => {
+                            self.player.handle_event(PlayerEvent::FocusGained);
+                        }
+                        WindowEvent::Focused(false) => {
+                            self.player.handle_event(PlayerEvent::FocusLost);
+                        }
                         WindowEvent::MouseInput { button, state, .. } => {
                             if self.gui.borrow_mut().is_context_menu_visible() {
                                 return;
@@ -251,22 +258,44 @@ impl App {
                                 _ => RuffleMouseButton::Unknown,
                             };
                             let event = match state {
-                                ElementState::Pressed => PlayerEvent::MouseDown { x, y, button },
+                                // TODO We should get information about click index from the OS,
+                                //   but winit does not support that yet.
+                                ElementState::Pressed => PlayerEvent::MouseDown {
+                                    x,
+                                    y,
+                                    button,
+                                    index: None,
+                                },
                                 ElementState::Released => PlayerEvent::MouseUp { x, y, button },
                             };
-                            if state == ElementState::Released && button == RuffleMouseButton::Right
+                            let handled = self.player.handle_event(event);
+                            if !handled
+                                && state == ElementState::Pressed
+                                && button == RuffleMouseButton::Right
                             {
                                 // Show context menu.
-                                // TODO: Should be squelched if player consumes the right click event.
                                 if let Some(mut player) = self.player.get() {
                                     let context_menu = player.prepare_context_menu();
-                                    self.gui.borrow_mut().show_context_menu(context_menu);
+
+                                    // MouseUp event will be ignored when the context menu is shown,
+                                    // but it has to be dispatched when the menu closes.
+                                    let close_event = PlayerEvent::MouseUp {
+                                        x,
+                                        y,
+                                        button: RuffleMouseButton::Right,
+                                    };
+                                    self.gui
+                                        .borrow_mut()
+                                        .show_context_menu(context_menu, close_event);
                                 }
                             }
-                            self.player.handle_event(event);
                             check_redraw = true;
                         }
                         WindowEvent::MouseWheel { delta, .. } => {
+                            if self.gui.borrow_mut().is_context_menu_visible() {
+                                return;
+                            }
+
                             use ruffle_core::events::MouseWheelDelta;
                             use winit::event::MouseScrollDelta;
                             let delta = match delta {
@@ -298,6 +327,10 @@ impl App {
                             modifiers = new_modifiers;
                         }
                         WindowEvent::KeyboardInput { event, .. } => {
+                            if self.gui.borrow_mut().is_context_menu_visible() {
+                                return;
+                            }
+
                             // Handle fullscreen keyboard shortcuts: Alt+Return, Escape.
                             match event {
                                 KeyEvent {
@@ -346,8 +379,8 @@ impl App {
                             // but we may want to be better at this in the future.
                             let key_char = event.text.clone().and_then(|text| text.chars().last());
 
-                            match &event.state {
-                                ElementState::Pressed => {
+                            match (key_code, &event.state) {
+                                (Some(key_code), ElementState::Pressed) => {
                                     self.player
                                         .handle_event(PlayerEvent::KeyDown { key_code, key_char });
                                     if let Some(control_code) =
@@ -363,10 +396,11 @@ impl App {
                                         }
                                     }
                                 }
-                                ElementState::Released => {
+                                (Some(key_code), ElementState::Released) => {
                                     self.player
                                         .handle_event(PlayerEvent::KeyUp { key_code, key_char });
                                 }
+                                _ => {}
                             };
                             check_redraw = true;
                         }
@@ -375,78 +409,92 @@ impl App {
                 }
                 winit::event::Event::UserEvent(RuffleEvent::TaskPoll) => self.player.poll(),
                 winit::event::Event::UserEvent(RuffleEvent::OnMetadata(swf_header)) => {
-                    let movie_width = swf_header.stage_size().width().to_pixels();
-                    let movie_height = swf_header.stage_size().height().to_pixels();
                     let height_offset = if self.window.fullscreen().is_some() || self.no_gui {
                         0.0
                     } else {
                         MENU_HEIGHT as f64
                     };
 
-                    let window_size: Size = match (self.preferred_width, self.preferred_height) {
-                        (None, None) => {
-                            LogicalSize::new(movie_width, movie_height + height_offset).into()
-                        }
-                        (Some(width), None) => {
-                            let scale = width / movie_width;
-                            let height = movie_height * scale;
-                            PhysicalSize::new(
+                    // To prevent issues like waiting on resize indefinitely (#11364) or desyncing the window state on Windows,
+                    // do not resize while window is maximized.
+                    let should_resize = !self.window.is_maximized();
+
+                    let viewport_size = if should_resize {
+                        let movie_width = swf_header.stage_size().width().to_pixels();
+                        let movie_height = swf_header.stage_size().height().to_pixels();
+
+                        let window_size: Size = match (self.preferred_width, self.preferred_height)
+                        {
+                            (None, None) => {
+                                LogicalSize::new(movie_width, movie_height + height_offset).into()
+                            }
+                            (Some(width), None) => {
+                                let scale = width / movie_width;
+                                let height = movie_height * scale;
+                                PhysicalSize::new(
+                                    width.max(1.0),
+                                    height.max(1.0) + height_offset * self.window.scale_factor(),
+                                )
+                                .into()
+                            }
+                            (None, Some(height)) => {
+                                let scale = height / movie_height;
+                                let width = movie_width * scale;
+                                PhysicalSize::new(
+                                    width.max(1.0),
+                                    height.max(1.0) + height_offset * self.window.scale_factor(),
+                                )
+                                .into()
+                            }
+                            (Some(width), Some(height)) => PhysicalSize::new(
                                 width.max(1.0),
                                 height.max(1.0) + height_offset * self.window.scale_factor(),
                             )
-                            .into()
+                            .into(),
+                        };
+
+                        let window_size = Size::clamp(
+                            window_size,
+                            self.min_window_size.into(),
+                            self.max_window_size.into(),
+                            self.window.scale_factor(),
+                        );
+
+                        let viewport_size = self.window.inner_size();
+                        let mut window_resize_denied = false;
+
+                        if let Some(new_viewport_size) = self.window.request_inner_size(window_size)
+                        {
+                            if new_viewport_size != viewport_size {
+                                self.gui.borrow_mut().resize(new_viewport_size);
+                            } else {
+                                tracing::warn!("Unable to resize window");
+                                window_resize_denied = true;
+                            }
                         }
-                        (None, Some(height)) => {
-                            let scale = height / movie_height;
-                            let width = movie_width * scale;
-                            PhysicalSize::new(
-                                width.max(1.0),
-                                height.max(1.0) + height_offset * self.window.scale_factor(),
-                            )
-                            .into()
+
+                        let viewport_size = self.window.inner_size();
+
+                        // On X11 (and possibly other platforms), the window size is not updated immediately.
+                        // On a successful resize request, wait for the window to be resized to the requested size
+                        // before we start running the SWF (which can observe the viewport size in "noScale" mode)
+                        if !window_resize_denied && window_size != viewport_size.into() {
+                            loaded = LoadingState::WaitingForResize;
+                        } else {
+                            loaded = LoadingState::Loaded;
                         }
-                        (Some(width), Some(height)) => PhysicalSize::new(
-                            width.max(1.0),
-                            height.max(1.0) + height_offset * self.window.scale_factor(),
-                        )
-                        .into(),
+
+                        viewport_size
+                    } else {
+                        self.window.inner_size()
                     };
 
-                    let window_size = Size::clamp(
-                        window_size,
-                        self.min_window_size.into(),
-                        self.max_window_size.into(),
-                        self.window.scale_factor(),
-                    );
-
-                    let viewport_size = self.window.inner_size();
-                    let mut window_resize_denied = false;
-
-                    if let Some(new_viewport_size) = self.window.request_inner_size(window_size) {
-                        if new_viewport_size != viewport_size {
-                            self.gui.borrow_mut().resize(new_viewport_size);
-                        } else {
-                            tracing::warn!("Unable to resize window");
-                            window_resize_denied = true;
-                        }
-                    }
                     self.window.set_fullscreen(if self.start_fullscreen {
                         Some(Fullscreen::Borderless(None))
                     } else {
                         None
                     });
                     self.window.set_visible(true);
-
-                    let viewport_size = self.window.inner_size();
-
-                    // On X11 (and possibly other platforms), the window size is not updated immediately.
-                    // On a successful resize request, wait for the window to be resized to the requested size
-                    // before we start running the SWF (which can observe the viewport size in "noScale" mode)
-                    if !window_resize_denied && window_size != viewport_size.into() {
-                        loaded = LoadingState::WaitingForResize;
-                    } else {
-                        loaded = LoadingState::Loaded;
-                    }
 
                     let viewport_scale_factor = self.window.scale_factor();
                     if let Some(mut player) = self.player.get() {
@@ -488,6 +536,10 @@ impl App {
                 winit::event::Event::UserEvent(RuffleEvent::ExitRequested) => {
                     elwt.exit();
                     return;
+                }
+
+                winit::event::Event::UserEvent(RuffleEvent::ThemeChanged(theme)) => {
+                    self.gui.borrow().set_theme(theme);
                 }
 
                 _ => (),

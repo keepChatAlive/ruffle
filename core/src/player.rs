@@ -33,6 +33,7 @@ use crate::events::GamepadButton;
 use crate::events::{ButtonKeyCode, ClipEvent, ClipEventResult, KeyCode, MouseButton, PlayerEvent};
 use crate::external::{ExternalInterface, ExternalInterfaceProvider, NullFsCommandProvider};
 use crate::external::{FsCommandProvider, Value as ExternalValue};
+use crate::focus_tracker::NavigationDirection;
 use crate::frame_lifecycle::{run_all_phases_avm2, FramePhase};
 use crate::library::Library;
 use crate::limits::ExecutionLimit;
@@ -56,9 +57,8 @@ use ruffle_render::commands::CommandList;
 use ruffle_render::quality::StageQuality;
 use ruffle_render::transform::TransformStack;
 use ruffle_video::backend::VideoBackend;
-use serde::Deserialize;
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::DerefMut;
 use std::rc::{Rc, Weak as RcWeak};
 use std::str::FromStr;
@@ -118,6 +118,28 @@ pub struct MouseData<'gc> {
 
     /// If the mouse is down, the object that the mouse is currently pressing.
     pub pressed: Option<InteractiveObject<'gc>>,
+    pub right_pressed: Option<InteractiveObject<'gc>>,
+    pub middle_pressed: Option<InteractiveObject<'gc>>,
+}
+
+impl<'gc> MouseData<'gc> {
+    pub fn pressed(&self, button: MouseButton) -> Option<InteractiveObject<'gc>> {
+        match button {
+            MouseButton::Unknown => None,
+            MouseButton::Left => self.pressed,
+            MouseButton::Right => self.right_pressed,
+            MouseButton::Middle => self.middle_pressed,
+        }
+    }
+
+    pub fn set_pressed(&mut self, button: MouseButton, value: Option<InteractiveObject<'gc>>) {
+        match button {
+            MouseButton::Unknown => {}
+            MouseButton::Left => self.pressed = value,
+            MouseButton::Right => self.right_pressed = value,
+            MouseButton::Middle => self.middle_pressed = value,
+        }
+    }
 }
 
 #[derive(Collect)]
@@ -602,7 +624,7 @@ impl Player {
                 // no AVM1 or AVM2 object - so just prepare the builtin items
                 let mut menu = ContextMenuState::new();
                 let builtin_items = BuiltInItemFlags::for_stage(context.stage);
-                menu.build_builtin_items(builtin_items, context.stage, &context.ui.language());
+                menu.build_builtin_items(builtin_items, context);
                 menu
             };
 
@@ -674,6 +696,9 @@ impl Player {
                     }
                     ContextMenuCallback::QualityHigh => {
                         context.stage.set_quality(context, StageQuality::High)
+                    }
+                    ContextMenuCallback::TextControl { code, text } => {
+                        text.text_control_input(*code, context)
                     }
                     _ => {}
                 }
@@ -846,8 +871,35 @@ impl Player {
 
     /// Handle an event sent into the player from the external windowing system
     /// or an HTML element.
-    ///
-    /// Event handling is a complicated affair, involving several different
+    pub fn handle_event(&mut self, event: PlayerEvent) -> bool {
+        match event {
+            PlayerEvent::FocusGained | PlayerEvent::FocusLost => self.handle_focus_event(event),
+            PlayerEvent::KeyDown { .. }
+            | PlayerEvent::KeyUp { .. }
+            | PlayerEvent::MouseMove { .. }
+            | PlayerEvent::MouseUp { .. }
+            | PlayerEvent::MouseDown { .. }
+            | PlayerEvent::MouseLeave
+            | PlayerEvent::MouseWheel { .. }
+            | PlayerEvent::GamepadButtonDown { .. }
+            | PlayerEvent::GamepadButtonUp { .. }
+            | PlayerEvent::TextInput { .. }
+            | PlayerEvent::TextControl { .. } => self.handle_input_event(event),
+        }
+    }
+
+    fn handle_focus_event(&mut self, event: PlayerEvent) -> bool {
+        if let PlayerEvent::FocusLost = event {
+            self.mutate_with_update_context(|context| {
+                let focus_tracker = context.focus_tracker;
+                focus_tracker.reset_focus(context);
+            });
+        }
+
+        true
+    }
+
+    /// Input event handling is a complicated affair, involving several different
     /// concerns that need to resolve with specific priority.
     ///
     /// 0. Transform gamepad button events into key events.
@@ -869,7 +921,8 @@ impl Player {
     /// 7. The AVM1 action queue is drained.
     /// 8. Mouse state is updated. This triggers button rollovers, which are a
     ///    second wave of event processing.
-    pub fn handle_event(&mut self, event: PlayerEvent) {
+    fn handle_input_event(&mut self, event: PlayerEvent) -> bool {
+        let mut player_event_handled = false;
         // Optionally transform gamepad button events into key events.
         let event = match event {
             PlayerEvent::GamepadButtonDown { button } => {
@@ -880,7 +933,7 @@ impl Player {
                     }
                 } else {
                     // Just ignore this event.
-                    return;
+                    return false;
                 }
             }
             PlayerEvent::GamepadButtonUp { button } => {
@@ -891,15 +944,20 @@ impl Player {
                     }
                 } else {
                     // Just ignore this event.
-                    return;
+                    return false;
                 }
             }
             _ => event,
         };
 
-        let prev_is_mouse_down = self.input.is_mouse_down();
+        let prev_mouse_buttons = self.input.get_mouse_down_buttons();
         self.input.handle_event(&event);
-        let is_mouse_button_changed = self.input.is_mouse_down() != prev_is_mouse_down;
+        let changed_mouse_buttons = self
+            .input
+            .get_mouse_down_buttons()
+            .symmetric_difference(&prev_mouse_buttons)
+            .cloned()
+            .collect();
 
         if cfg!(feature = "avm_debug") {
             match event {
@@ -1081,12 +1139,31 @@ impl Player {
                     let delta = Value::from(delta.lines());
                     (None, Some(("Mouse", "onMouseWheel", vec![delta])))
                 }
+                PlayerEvent::MouseUp {
+                    button: MouseButton::Right,
+                    ..
+                } => (Some(ClipEvent::RightMouseUp), None),
+                PlayerEvent::MouseDown {
+                    button: MouseButton::Right,
+                    ..
+                } => (Some(ClipEvent::RightMouseDown), None),
+                PlayerEvent::MouseUp {
+                    button: MouseButton::Middle,
+                    ..
+                } => (Some(ClipEvent::MiddleMouseUp), None),
+                PlayerEvent::MouseDown {
+                    button: MouseButton::Middle,
+                    ..
+                } => (Some(ClipEvent::MiddleMouseDown), None),
                 _ => (None, None),
             };
 
             // Fire clip event on all clips.
             if let Some(clip_event) = clip_event {
-                context.stage.handle_clip_event(context, clip_event);
+                if context.stage.handle_clip_event(context, clip_event) == ClipEventResult::Handled
+                {
+                    player_event_handled = true;
+                }
             }
 
             // Fire event listener on appropriate object
@@ -1113,6 +1190,10 @@ impl Player {
                 false
             };
 
+            if key_press_handled {
+                player_event_handled = true;
+            }
+
             // KeyPress events take precedence over text input.
             if !key_press_handled {
                 if let Some(text) = context.focus_tracker.get_as_edit_text() {
@@ -1122,6 +1203,19 @@ impl Player {
                     if let PlayerEvent::TextControl { code } = event {
                         text.text_control_input(code, context);
                     }
+                }
+            }
+
+            // KeyPress events also take precedence over tabbing.
+            if !key_press_handled {
+                if let PlayerEvent::KeyDown {
+                    key_code: KeyCode::Tab,
+                    ..
+                } = event
+                {
+                    let reversed = context.input.is_key_down(KeyCode::Shift);
+                    let tracker = context.focus_tracker;
+                    tracker.cycle(context, reversed);
                 }
             }
 
@@ -1138,8 +1232,15 @@ impl Player {
                     ) {
                         // The button/clip is pressed and then immediately released.
                         // We do not have to wait for KeyUp.
-                        focus.handle_clip_event(context, ClipEvent::Press);
-                        focus.handle_clip_event(context, ClipEvent::Release);
+                        focus.handle_clip_event(context, ClipEvent::Press { index: 0 });
+                        focus.handle_clip_event(context, ClipEvent::Release { index: 0 });
+                    }
+
+                    if let PlayerEvent::KeyDown { key_code, .. } = event {
+                        if let Some(direction) = NavigationDirection::from_key_code(key_code) {
+                            let tracker = context.focus_tracker;
+                            tracker.navigate(context, direction);
+                        }
                     }
                 }
             }
@@ -1149,16 +1250,8 @@ impl Player {
 
         // Update mouse state.
         if let PlayerEvent::MouseMove { x, y }
-        | PlayerEvent::MouseDown {
-            x,
-            y,
-            button: MouseButton::Left,
-        }
-        | PlayerEvent::MouseUp {
-            x,
-            y,
-            button: MouseButton::Left,
-        } = event
+        | PlayerEvent::MouseDown { x, y, .. }
+        | PlayerEvent::MouseUp { x, y, .. } = event
         {
             let inverse_view_matrix =
                 self.mutate_with_update_context(|context| context.stage.inverse_view_matrix());
@@ -1173,43 +1266,40 @@ impl Player {
             let is_mouse_moved = prev_mouse_position != self.mouse_position;
 
             // This fires button rollover/press events, which should run after the above mouseMove events.
-            if self.update_mouse_state(is_mouse_button_changed, is_mouse_moved) {
+            if self.update_mouse_state(
+                &changed_mouse_buttons,
+                is_mouse_moved,
+                &mut player_event_handled,
+            ) {
                 self.needs_render = true;
             }
         }
 
         if let PlayerEvent::MouseWheel { delta } = event {
             self.mutate_with_update_context(|context| {
-                if let Some(over_object) = context.mouse_data.hovered {
+                let target = if let Some(over_object) = context.mouse_data.hovered {
                     if over_object.as_displayobject().movie().is_action_script_3()
                         || !over_object.as_displayobject().avm1_removed()
                     {
-                        over_object.handle_clip_event(context, ClipEvent::MouseWheel { delta });
+                        Some(over_object)
+                    } else {
+                        None
                     }
                 } else {
-                    context
-                        .stage
-                        .handle_clip_event(context, ClipEvent::MouseWheel { delta });
+                    context.stage.as_interactive()
+                };
+                if let Some(target) = target {
+                    let event = ClipEvent::MouseWheel { delta };
+                    target.event_dispatch_to_avm2(context, event);
+                    target.handle_clip_event(context, event);
                 }
             });
         }
 
         if let PlayerEvent::MouseLeave = event {
-            if self.update_mouse_state(is_mouse_button_changed, true) {
+            if self.update_mouse_state(&changed_mouse_buttons, true, &mut player_event_handled) {
                 self.needs_render = true;
             }
-        }
-
-        if let PlayerEvent::KeyDown {
-            key_code: KeyCode::Tab,
-            ..
-        } = event
-        {
-            self.mutate_with_update_context(|context| {
-                let reversed = context.input.is_key_down(KeyCode::Shift);
-                let tracker = context.focus_tracker;
-                tracker.cycle(context, reversed);
-            });
         }
 
         if self.should_reset_highlight(event) {
@@ -1217,6 +1307,8 @@ impl Player {
                 context.focus_tracker.reset_highlight();
             });
         }
+
+        player_event_handled
     }
 
     fn should_reset_highlight(&self, event: PlayerEvent) -> bool {
@@ -1292,20 +1384,25 @@ impl Player {
                 // Turn the dragged object invisible so that we don't pick it.
                 // TODO: This could be handled via adding a `HitTestOptions::SKIP_DRAGGED`.
                 let was_visible = display_object.visible();
-                display_object.set_visible(context.gc_context, false);
+                display_object.set_visible(context, false);
                 // Set `_droptarget` to the object the mouse is hovering over.
                 let drop_target_object = run_mouse_pick(context, false);
                 movie_clip.set_drop_target(
                     context.gc_context,
                     drop_target_object.map(|d| d.as_displayobject()),
                 );
-                display_object.set_visible(context.gc_context, was_visible);
+                display_object.set_visible(context, was_visible);
             }
         }
     }
 
     /// Updates the hover state of buttons.
-    fn update_mouse_state(&mut self, is_mouse_button_changed: bool, is_mouse_moved: bool) -> bool {
+    fn update_mouse_state(
+        &mut self,
+        changed_mouse_buttons: &HashSet<MouseButton>,
+        is_mouse_moved: bool,
+        player_event_handled: &mut bool,
+    ) -> bool {
         let mut new_cursor = self.mouse_cursor;
         let mut mouse_cursor_needs_check = self.mouse_cursor_needs_check;
         let mouse_in_stage = self.mouse_in_stage();
@@ -1315,8 +1412,9 @@ impl Player {
         let needs_render = self.mutate_with_update_context(|context| {
             // Objects may be hovered using Tab,
             // skip mouse hover when it's not necessary.
-            let mut skip_mouse_hover =
-                !is_mouse_moved && !is_mouse_button_changed && context.mouse_data.hovered.is_some();
+            let mut skip_mouse_hover = !is_mouse_moved
+                && changed_mouse_buttons.is_empty()
+                && context.mouse_data.hovered.is_some();
 
             let new_over_object = if mouse_in_stage {
                 run_mouse_pick(context, true)
@@ -1390,7 +1488,7 @@ impl Player {
                     context.mouse_data.hovered.is_none() && context.mouse_data.pressed.is_none();
                 if !object_removed {
                     mouse_cursor_needs_check = false;
-                    if is_mouse_button_changed {
+                    if changed_mouse_buttons.contains(&MouseButton::Left) {
                         // The object is pressed/released and may be removed immediately, we need to check
                         // in the next frame if it still exists. If it doesn't, we'll update the cursor.
                         mouse_cursor_needs_check = true;
@@ -1398,8 +1496,8 @@ impl Player {
                 } else if mouse_cursor_needs_check {
                     mouse_cursor_needs_check = false;
                     new_cursor = MouseCursor::Arrow;
-                } else if !context.input.is_mouse_down()
-                    && (is_mouse_moved || is_mouse_button_changed)
+                } else if !context.input.is_mouse_down(MouseButton::Left)
+                    && (is_mouse_moved || changed_mouse_buttons.contains(&MouseButton::Left))
                 {
                     // In every other case, the cursor remains until the user interacts with the mouse again.
                     new_cursor = MouseCursor::Arrow;
@@ -1415,7 +1513,7 @@ impl Player {
             {
                 // If the mouse button is down, the object the user clicked on grabs the focus
                 // and fires "drag" events. Other objects are ignored.
-                if context.input.is_mouse_down() {
+                if context.input.is_mouse_down(MouseButton::Left) {
                     context.mouse_data.hovered = new_over_object;
                     if let Some(down_object) = context.mouse_data.pressed {
                         if InteractiveObject::option_ptr_eq(
@@ -1471,27 +1569,47 @@ impl Player {
                 context.mouse_data.hovered = new_over_object;
             }
             // Handle presses and releases.
-            if is_mouse_button_changed {
-                if context.input.is_mouse_down() {
+            for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+                if !changed_mouse_buttons.contains(&button) {
+                    continue;
+                }
+
+                if context.input.is_mouse_down(button) {
+                    let event = match button {
+                        MouseButton::Left => ClipEvent::Press {
+                            index: context.input.last_click_index(),
+                        },
+                        MouseButton::Right => ClipEvent::RightPress,
+                        MouseButton::Middle => ClipEvent::MiddlePress,
+                        _ => unreachable!(),
+                    };
                     // Pressed on a hovered object.
                     if let Some(over_object) = context.mouse_data.hovered {
-                        events.push((over_object, ClipEvent::Press));
-                        context.mouse_data.pressed = context.mouse_data.hovered;
+                        events.push((over_object, event));
+                        context
+                            .mouse_data
+                            .set_pressed(button, context.mouse_data.hovered);
                     } else {
-                        events.push((context.stage.into(), ClipEvent::Press));
+                        events.push((context.stage.into(), event));
                     }
                 } else {
+                    let event = match button {
+                        MouseButton::Left => ClipEvent::MouseUpInside,
+                        MouseButton::Right => ClipEvent::RightMouseUpInside,
+                        MouseButton::Middle => ClipEvent::MiddleMouseUpInside,
+                        _ => unreachable!(),
+                    };
                     if let Some(over_object) = context.mouse_data.hovered {
-                        events.push((over_object, ClipEvent::MouseUpInside));
+                        events.push((over_object, event));
                     } else {
-                        events.push((context.stage.into(), ClipEvent::MouseUpInside));
+                        events.push((context.stage.into(), event));
                     }
 
                     let mut released_inside = InteractiveObject::option_ptr_eq(
-                        context.mouse_data.pressed,
+                        context.mouse_data.pressed(button),
                         context.mouse_data.hovered,
                     );
-                    if let Some(down) = context.mouse_data.pressed {
+                    if let Some(down) = context.mouse_data.pressed(button) {
                         if let Some(over) = context.mouse_data.hovered {
                             if !released_inside {
                                 released_inside = Self::check_display_object_equality(
@@ -1502,34 +1620,53 @@ impl Player {
                         }
                     }
                     if released_inside {
+                        let event = match button {
+                            MouseButton::Left => ClipEvent::Release {
+                                index: context.input.last_click_index(),
+                            },
+                            MouseButton::Right => ClipEvent::RightRelease,
+                            MouseButton::Middle => ClipEvent::MiddleRelease,
+                            _ => unreachable!(),
+                        };
                         // Released inside the clicked object.
-                        if let Some(down_object) = context.mouse_data.pressed {
-                            new_cursor = down_object.mouse_cursor(context);
-                            events.push((down_object, ClipEvent::Release));
+                        if let Some(down_object) = context.mouse_data.pressed(button) {
+                            if button == MouseButton::Left {
+                                new_cursor = down_object.mouse_cursor(context);
+                            }
+                            events.push((down_object, event));
                         } else {
-                            events.push((context.stage.into(), ClipEvent::Release));
+                            events.push((context.stage.into(), event));
                         }
                     } else {
+                        let event = match button {
+                            MouseButton::Left => ClipEvent::ReleaseOutside,
+                            MouseButton::Right => ClipEvent::RightReleaseOutside,
+                            MouseButton::Middle => ClipEvent::MiddleReleaseOutside,
+                            _ => unreachable!(),
+                        };
                         // Released outside the clicked object.
-                        if let Some(down_object) = context.mouse_data.pressed {
-                            events.push((down_object, ClipEvent::ReleaseOutside));
+                        if let Some(down_object) = context.mouse_data.pressed(button) {
+                            events.push((down_object, event));
                         } else {
-                            events.push((context.stage.into(), ClipEvent::ReleaseOutside));
+                            events.push((context.stage.into(), event));
                         }
-                        // The new object is rolled over immediately.
-                        if let Some(over_object) = context.mouse_data.hovered {
-                            new_cursor = over_object.mouse_cursor(context);
-                            events.push((
-                                over_object,
-                                ClipEvent::RollOver {
-                                    from: cur_over_object,
-                                },
-                            ));
-                        } else {
-                            new_cursor = MouseCursor::Arrow;
+
+                        if button == MouseButton::Left {
+                            // The new object is rolled over immediately.
+                            if let Some(over_object) = context.mouse_data.hovered {
+                                new_cursor = over_object.mouse_cursor(context);
+                                events.push((
+                                    over_object,
+                                    ClipEvent::RollOver {
+                                        from: cur_over_object,
+                                    },
+                                ));
+                            } else {
+                                new_cursor = MouseCursor::Arrow;
+                            }
                         }
                     }
-                    context.mouse_data.pressed = None;
+                    context.mouse_data.set_pressed(button, None);
                 }
             }
 
@@ -1541,9 +1678,15 @@ impl Player {
                 for (object, event) in events {
                     let display_object = object.as_displayobject();
                     if !display_object.avm1_removed() {
-                        object.handle_clip_event(context, event);
-                        if display_object.movie().is_action_script_3() {
-                            object.event_dispatch_to_avm2(context, event);
+                        if object.handle_clip_event(context, event) == ClipEventResult::Handled {
+                            *player_event_handled = true;
+                        }
+                        if matches!(event, ClipEvent::Press { .. }) {
+                            Self::update_focus_on_mouse_press(context, display_object);
+                        }
+                        if object.event_dispatch_to_avm2(context, event) == ClipEventResult::Handled
+                        {
+                            *player_event_handled = true;
                         }
                     }
                     if !refresh && event.is_button_event() {
@@ -1572,6 +1715,32 @@ impl Player {
         self.mouse_cursor_needs_check = mouse_cursor_needs_check;
 
         needs_render
+    }
+
+    fn update_focus_on_mouse_press<'gc>(
+        context: &mut UpdateContext<'_, 'gc>,
+        pressed_object: DisplayObject<'gc>,
+    ) {
+        let tracker = context.focus_tracker;
+        let mut pressed_object = pressed_object.as_interactive();
+        if InteractiveObject::option_ptr_eq(pressed_object, context.stage.as_interactive()) {
+            pressed_object = None;
+        }
+
+        let should_focus = pressed_object.is_some_and(|int| {
+            // AVM2 fires focus change events even if the related object is not focusable
+            int.as_displayobject().movie().is_action_script_3()
+                || int.is_focusable_by_mouse(context)
+        });
+        if should_focus {
+            tracker.set_by_mouse(pressed_object, context);
+        } else if tracker
+            .get()
+            .is_some_and(|int| int.is_focusable_by_mouse(context))
+        {
+            // Need to clear the focus if an object focusable by mouse was un-focused.
+            tracker.set_by_mouse(None, context);
+        }
     }
 
     //Checks if two displayObjects have the same depth and id and accur in the same movie.s
@@ -1656,6 +1825,8 @@ impl Player {
                 did_finish = LoadManager::preload_tick(context, limit);
             }
 
+            Self::run_actions(context);
+
             did_finish
         })
     }
@@ -1685,6 +1856,7 @@ impl Player {
             run_all_phases_avm2(context);
             Avm1::run_frame(context);
             AudioManager::update_sounds(context);
+            LocalConnections::update_connections(context);
 
             // Only run the current list of callbacks - any callbacks added during callback execution
             // will be run at the end of the *next* frame.
@@ -1771,6 +1943,10 @@ impl Player {
 
     pub fn navigator(&self) -> &Navigator {
         &self.navigator
+    }
+
+    pub fn navigator_mut(&mut self) -> &mut Navigator {
+        &mut self.navigator
     }
 
     // The frame rate of the current movie in FPS.
@@ -2053,7 +2229,7 @@ impl Player {
         self.mutate_with_update_context(|context| {
             Self::update_drag(context);
         });
-        self.update_mouse_state(false, false);
+        self.update_mouse_state(&HashSet::new(), false, &mut false);
 
         // GC
         self.gc_arena.borrow_mut().collect_debt();
@@ -2289,6 +2465,13 @@ impl PlayerBuilder {
         self
     }
 
+    /// Sets the audio backend of the player.
+    #[inline]
+    pub fn with_boxed_audio(mut self, audio: Box<dyn AudioBackend>) -> Self {
+        self.audio = Some(audio);
+        self
+    }
+
     /// Sets the logging backend of the player.
     #[inline]
     pub fn with_log(mut self, log: impl 'static + LogBackend) -> Self {
@@ -2516,6 +2699,8 @@ impl PlayerBuilder {
                     mouse_data: MouseData {
                         hovered: None,
                         pressed: None,
+                        right_pressed: None,
+                        middle_pressed: None,
                     },
                     avm1_shared_objects: HashMap::new(),
                     avm2_shared_objects: HashMap::new(),
@@ -2757,7 +2942,8 @@ fn run_mouse_pick<'gc>(
 }
 
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
-#[derive(Default, Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[derive(Default, Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
 pub enum PlayerRuntime {
     #[default]
     FlashPlayer,

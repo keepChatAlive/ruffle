@@ -463,8 +463,15 @@ impl<'gc> DisplayObjectBase<'gc> {
             value = 0.0.into();
         }
 
-        let cos = f64::cos(self.rotation.into_radians());
-        let sin = f64::sin(self.rotation.into_radians());
+        // Similarly, a rotation of `NaN` can be reported to ActionScript, but we
+        // treat it as 0.0 when calculating the matrix
+        let mut rot = self.rotation.into_radians();
+        if rot.is_nan() {
+            rot = 0.0;
+        }
+
+        let cos = f64::cos(rot);
+        let sin = f64::sin(rot);
         let matrix = &mut self.transform.matrix;
         matrix.a = (cos * value.unit()) as f32;
         matrix.b = (sin * value.unit()) as f32;
@@ -490,8 +497,15 @@ impl<'gc> DisplayObjectBase<'gc> {
             value = 0.0.into();
         }
 
-        let cos = f64::cos(self.rotation.into_radians() + self.skew);
-        let sin = f64::sin(self.rotation.into_radians() + self.skew);
+        // Similarly, a rotation of `NaN` can be reported to ActionScript, but we
+        // treat it as 0.0 when calculating the matrix
+        let mut rot = self.rotation.into_radians();
+        if rot.is_nan() {
+            rot = 0.0;
+        }
+
+        let cos = f64::cos(rot + self.skew);
+        let sin = f64::sin(rot + self.skew);
         let matrix = &mut self.transform.matrix;
         matrix.c = (-sin * value.unit()) as f32;
         matrix.d = (cos * value.unit()) as f32;
@@ -957,7 +971,6 @@ pub fn render_base<'gc>(this: DisplayObject<'gc>, context: &mut RenderContext<'_
                 Matrix::create_box(
                     bounds.width().to_pixels() as f32,
                     bounds.height().to_pixels() as f32,
-                    0.0,
                     bounds.x_min,
                     bounds.y_min,
                 ),
@@ -1133,6 +1146,17 @@ pub trait TDisplayObject<'gc>:
     /// The world bounding box of this object including children, relative to the stage.
     fn world_bounds(&self) -> Rectangle<Twips> {
         self.bounds_with_transform(&self.local_to_global_matrix())
+    }
+
+    /// Bounds used for drawing debug rects and picking objects.
+    fn debug_rect_bounds(&self) -> Rectangle<Twips> {
+        // Make the rect at least as big as highlight bounds to ensure that anything
+        // interactive is also highlighted even if not included in world bounds.
+        let highlight_bounds = self
+            .as_interactive()
+            .map(|int| int.highlight_bounds())
+            .unwrap_or_default();
+        self.world_bounds().union(&highlight_bounds)
     }
 
     /// Gets the bounds of this object and all children, transformed by a given matrix.
@@ -1642,7 +1666,8 @@ pub trait TDisplayObject<'gc>:
         remove_old_link: bool,
     ) {
         if remove_old_link {
-            if let Some(old_masker) = self.base().masker() {
+            let old_masker = self.base().masker();
+            if let Some(old_masker) = old_masker {
                 old_masker.set_maskee(gc_context, None, false);
             }
             if let Some(parent) = self.parent() {
@@ -1662,7 +1687,8 @@ pub trait TDisplayObject<'gc>:
         remove_old_link: bool,
     ) {
         if remove_old_link {
-            if let Some(old_maskee) = self.base().maskee() {
+            let old_maskee = self.base().maskee();
+            if let Some(old_maskee) = old_maskee {
                 old_maskee.set_masker(gc_context, None, false);
             }
             self.invalidate_cached_bitmap(gc_context);
@@ -1724,11 +1750,18 @@ pub trait TDisplayObject<'gc>:
     /// Sets whether this display object will be visible.
     /// Invisible objects are not rendered, but otherwise continue to exist normally.
     /// Returned by the `_visible`/`visible` ActionScript properties.
-    fn set_visible(&self, gc_context: &Mutation<'gc>, value: bool) {
-        if self.base_mut(gc_context).set_visible(value) {
+    fn set_visible(&self, context: &mut UpdateContext<'_, 'gc>, value: bool) {
+        if self.base_mut(context.gc()).set_visible(value) {
             if let Some(parent) = self.parent() {
                 // We don't need to invalidate ourselves, we're just toggling if the bitmap is rendered.
-                parent.invalidate_cached_bitmap(gc_context);
+                parent.invalidate_cached_bitmap(context.gc());
+            }
+        }
+
+        if !value {
+            if let Some(int) = self.as_interactive() {
+                // The focus is dropped when it's made invisible.
+                int.drop_focus(context);
             }
         }
     }
@@ -1961,7 +1994,7 @@ pub trait TDisplayObject<'gc>:
             // the corresponding `SymbolClass` *not* extend `MovieClip` (e.g. extending `Sprite` directly.)
             // When this occurs, Flash Player will run the first frame, and immediately stop.
             // However, Flash Player runs frames for the root movie clip, even if it doesn't extend `MovieClip`.
-            if !obj.is_of_type(movieclip_class, context) && !movie.is_root() {
+            if !obj.is_of_type(movieclip_class) && !movie.is_root() {
                 movie.stop(context);
             }
             movie.set_initialized(context.gc_context);
@@ -2122,6 +2155,10 @@ pub trait TDisplayObject<'gc>:
             }
         }
 
+        context
+            .audio_manager
+            .stop_sounds_with_display_object(context.audio, (*self).into());
+
         self.set_avm1_removed(context.gc_context, true);
     }
 
@@ -2195,7 +2232,7 @@ pub trait TDisplayObject<'gc>:
             }
             if self.swf_version() >= 11 {
                 if let Some(visible) = place_object.is_visible {
-                    self.set_visible(context.gc_context, visible);
+                    self.set_visible(context, visible);
                 }
                 if let Some(mut color) = place_object.background_color {
                     let color = if color.a > 0 {

@@ -7,18 +7,21 @@ use crate::preferences::GlobalPreferences;
 use anyhow::anyhow;
 use egui::{Context, ViewportId};
 use fontdb::{Database, Family, Query, Source};
-use ruffle_core::Player;
+use futures::StreamExt;
+use ruffle_core::{Player, PlayerEvent};
 use ruffle_render_wgpu::backend::{request_adapter_and_device, WgpuRenderBackend};
 use ruffle_render_wgpu::descriptors::Descriptors;
 use ruffle_render_wgpu::utils::{format_list, get_backend_names};
+use std::error::Error;
 use std::rc::Rc;
 use std::sync::{Arc, MutexGuard};
 use std::time::{Duration, Instant};
 use unic_langid::LanguageIdentifier;
 use url::Url;
+use wgpu::SurfaceError;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
-use winit::event_loop::EventLoop;
+use winit::event_loop::{EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Theme, Window};
 
@@ -42,7 +45,7 @@ pub struct GuiController {
 }
 
 impl GuiController {
-    pub fn new(
+    pub async fn new(
         window: Rc<Window>,
         event_loop: &EventLoop<RuffleEvent>,
         preferences: GlobalPreferences,
@@ -89,9 +92,14 @@ impl GuiController {
                 view_formats: Default::default(),
             },
         );
+        let event_loop = event_loop.create_proxy();
         let descriptors = Descriptors::new(instance, adapter, device, queue);
         let egui_ctx = Context::default();
-        if let Some(Theme::Light) = window.theme() {
+
+        let theme = start_theme_watcher(event_loop.clone())
+            .await
+            .or_else(|| window.theme());
+        if let Some(Theme::Light) = theme {
             egui_ctx.set_visuals(egui::Visuals::light());
         }
 
@@ -107,7 +115,6 @@ impl GuiController {
             window.scale_factor(),
         ));
         let egui_renderer = egui_wgpu::Renderer::new(&descriptors.device, surface_format, None, 1);
-        let event_loop = event_loop.create_proxy();
         let descriptors = Arc::new(descriptors);
         let gui = RuffleGui::new(
             event_loop,
@@ -137,33 +144,45 @@ impl GuiController {
         })
     }
 
+    pub fn set_theme(&self, theme: Theme) {
+        self.egui_winit.egui_ctx().set_visuals(match theme {
+            Theme::Light => egui::Visuals::light(),
+            Theme::Dark => egui::Visuals::dark(),
+        });
+        self.window.request_redraw();
+    }
+
     pub fn descriptors(&self) -> &Arc<Descriptors> {
         &self.descriptors
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
         if size.width > 0 && size.height > 0 {
-            self.surface.configure(
-                &self.descriptors.device,
-                &wgpu::SurfaceConfiguration {
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    format: self.surface_format,
-                    width: size.width,
-                    height: size.height,
-                    present_mode: Default::default(),
-                    desired_maximum_frame_latency: 2,
-                    alpha_mode: Default::default(),
-                    view_formats: Default::default(),
-                },
-            );
-            self.movie_view_renderer.update_resolution(
-                &self.descriptors,
-                self.window.fullscreen().is_none() && !self.no_gui,
-                size.height,
-                self.window.scale_factor(),
-            );
             self.size = size;
+            self.reconfigure_surface();
         }
+    }
+
+    pub fn reconfigure_surface(&mut self) {
+        self.surface.configure(
+            &self.descriptors.device,
+            &wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: self.surface_format,
+                width: self.size.width,
+                height: self.size.height,
+                present_mode: Default::default(),
+                desired_maximum_frame_latency: 2,
+                alpha_mode: Default::default(),
+                view_formats: Default::default(),
+            },
+        );
+        self.movie_view_renderer.update_resolution(
+            &self.descriptors,
+            self.window.fullscreen().is_none() && !self.no_gui,
+            self.size.height,
+            self.window.scale_factor(),
+        );
     }
 
     #[must_use]
@@ -173,11 +192,7 @@ impl GuiController {
         }
 
         if let WindowEvent::ThemeChanged(theme) = &event {
-            let visuals = match theme {
-                Theme::Dark => egui::Visuals::dark(),
-                Theme::Light => egui::Visuals::light(),
-            };
-            self.egui_winit.egui_ctx().set_visuals(visuals);
+            self.set_theme(*theme);
         }
 
         if matches!(
@@ -224,10 +239,33 @@ impl GuiController {
     }
 
     pub fn render(&mut self, mut player: Option<MutexGuard<Player>>) {
-        let surface_texture = self
-            .surface
-            .get_current_texture()
-            .expect("Surface became unavailable");
+        let surface_texture = match self.surface.get_current_texture() {
+            Ok(surface_texture) => surface_texture,
+            Err(e @ (SurfaceError::Lost | SurfaceError::Outdated)) => {
+                // Reconfigure the surface if lost or outdated.
+                // Some sources suggest ignoring `Outdated` and waiting for the next frame,
+                // but I suspect this advice is related explicitly to resizing,
+                // because the future resize event will reconfigure the surface.
+                // However, resizing is not the only possible reason for the surface
+                // to become outdated (resolution / refresh rate change, some internal
+                // platform-specific reasons, wgpu bugs?).
+                // Testing on Vulkan shows that reconfiguring the surface works in that case.
+                tracing::warn!("Surface became unavailable: {:?}, reconfiguring", e);
+                self.reconfigure_surface();
+                return;
+            }
+            Err(e @ SurfaceError::Timeout) => {
+                // An operation related to the surface took too long to complete.
+                // This error may happen due to many reasons (GPU overload, GPU driver bugs, etc.),
+                // the best thing we can do is skip a frame and wait.
+                tracing::warn!("Surface became unavailable: {:?}, skipping a frame", e);
+                return;
+            }
+            Err(SurfaceError::OutOfMemory) => {
+                // Cannot help with that :(
+                panic!("wgpu: Out of memory: no more memory left to allocate a new frame");
+            }
+        };
 
         let raw_input = self.egui_winit.take_egui_input(&self.window);
         let show_menu = self.window.fullscreen().is_none() && !self.no_gui;
@@ -340,8 +378,12 @@ impl GuiController {
         surface_texture.present();
     }
 
-    pub fn show_context_menu(&mut self, menu: Vec<ruffle_core::ContextMenuItem>) {
-        self.gui.show_context_menu(menu);
+    pub fn show_context_menu(
+        &mut self,
+        menu: Vec<ruffle_core::ContextMenuItem>,
+        close_event: PlayerEvent,
+    ) {
+        self.gui.show_context_menu(menu, close_event);
     }
 
     pub fn is_context_menu_visible(&self) -> bool {
@@ -473,4 +515,54 @@ fn load_system_fonts(
         .push(name);
 
     Ok(fd)
+}
+
+#[cfg(target_os = "linux")]
+async fn start_theme_watcher(event_loop: EventLoopProxy<RuffleEvent>) -> Option<Theme> {
+    start_dbus_theme_watcher_linux(event_loop)
+        .await
+        .inspect_err(|err| {
+            tracing::warn!("Error registering theme watcher: {}", err);
+        })
+        .ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn start_theme_watcher(_event_loop: EventLoopProxy<RuffleEvent>) -> Option<Theme> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+async fn start_dbus_theme_watcher_linux(
+    event_loop: EventLoopProxy<RuffleEvent>,
+) -> Result<Theme, Box<dyn Error>> {
+    use crate::dbus::{ColorScheme, FreedesktopSettings};
+
+    fn to_theme(color_scheme: ColorScheme) -> Theme {
+        match color_scheme {
+            ColorScheme::Default => Theme::Light,
+            ColorScheme::PreferLight => Theme::Light,
+            ColorScheme::PreferDark => Theme::Dark,
+        }
+    }
+
+    let connection = zbus::Connection::session().await?;
+    let settings = FreedesktopSettings::new(&connection).await?;
+    let scheme = settings.color_scheme().await?;
+
+    let mut stream = Box::pin(settings.watch_color_scheme().await?);
+    tokio::spawn(Box::pin(async move {
+        while let Some(scheme) = stream.next().await {
+            match scheme {
+                Ok(scheme) => {
+                    let _ = event_loop.send_event(RuffleEvent::ThemeChanged(to_theme(scheme)));
+                }
+                Err(err) => {
+                    tracing::warn!("Error while watching for color scheme changes: {}", err);
+                }
+            }
+        }
+    }));
+
+    Ok(to_theme(scheme))
 }

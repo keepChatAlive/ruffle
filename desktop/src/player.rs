@@ -17,6 +17,7 @@ use ruffle_frontend_utils::bundle::source::BundleSourceError;
 use ruffle_frontend_utils::bundle::{Bundle, BundleError};
 use ruffle_frontend_utils::content::PlayingContent;
 use ruffle_frontend_utils::player_options::PlayerOptions;
+use ruffle_frontend_utils::recents::Recent;
 use ruffle_render::backend::RenderBackend;
 use ruffle_render::quality::StageQuality;
 use ruffle_render_wgpu::backend::WgpuRenderBackend;
@@ -75,6 +76,8 @@ impl From<&GlobalPreferences> for LaunchOptions {
                 load_behavior: value.cli.load_behavior,
                 letterbox: value.cli.letterbox,
                 spoof_url: value.cli.spoof_url.clone(),
+                referer: value.cli.referer.clone(),
+                cookie: value.cli.cookie.clone(),
                 player_version: value.cli.player_version,
                 player_runtime: value.cli.player_runtime,
                 frame_rate: value.cli.frame_rate,
@@ -165,6 +168,19 @@ impl ActivePlayer {
             }
         }
 
+        let recent_limit = preferences.recent_limit();
+        if let Err(e) = preferences.write_recents(|writer| {
+            writer.push(
+                Recent {
+                    url: movie_url.clone(),
+                    name: content.name(),
+                },
+                recent_limit,
+            )
+        }) {
+            tracing::warn!("Couldn't update recents: {e}");
+        }
+
         let opt = match &content {
             PlayingContent::DirectFile(_) => Cow::Borrowed(opt),
             PlayingContent::Bundle(_, bundle) => {
@@ -192,6 +208,8 @@ impl ActivePlayer {
                 .base
                 .to_owned()
                 .unwrap_or_else(|| movie_url.clone()),
+            opt.player.referer.clone(),
+            opt.player.cookie.clone(),
             future_spawner,
             opt.proxy.clone(),
             opt.player.upgrade_to_https.unwrap_or_default(),
@@ -202,9 +220,27 @@ impl ActivePlayer {
             RfdNavigatorInterface,
         );
 
-        if cfg!(feature = "software_video") {
-            builder =
-                builder.with_video(ruffle_video_software::backend::SoftwareVideoBackend::new());
+        if cfg!(feature = "external_video") && preferences.openh264_enabled() {
+            #[cfg(feature = "external_video")]
+            {
+                use ruffle_video_external::backend::ExternalVideoBackend;
+                let path = tokio::task::block_in_place(ExternalVideoBackend::get_openh264);
+                let openh264_path = match path {
+                    Ok(path) => Some(path),
+                    Err(e) => {
+                        tracing::error!("Couldn't get OpenH264: {}", e);
+                        None
+                    }
+                };
+
+                builder = builder.with_video(ExternalVideoBackend::new(openh264_path));
+            }
+        } else {
+            #[cfg(feature = "software_video")]
+            {
+                builder =
+                    builder.with_video(ruffle_video_software::backend::SoftwareVideoBackend::new());
+            }
         }
 
         let renderer = WgpuRenderBackend::new(descriptors, movie_view)
@@ -399,12 +435,14 @@ impl PlayerController {
         }
     }
 
-    pub fn handle_event(&self, event: PlayerEvent) {
+    pub fn handle_event(&self, event: PlayerEvent) -> bool {
         if let Some(mut player) = self.get() {
             if player.is_playing() {
-                player.handle_event(event);
+                return player.handle_event(event);
             }
         }
+
+        false
     }
 
     pub fn poll(&self) {

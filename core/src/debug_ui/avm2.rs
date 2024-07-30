@@ -87,7 +87,7 @@ impl Avm2ObjectWindow {
             .num_columns(2)
             .striped(true)
             .show(ui, |ui| {
-                if let Some(class) = object.instance_of() {
+                if let Some(class) = object.instance_class().class_object() {
                     ui.label("Instance Of");
                     show_avm2_value(ui, &mut activation.context, class.into(), messages);
                     ui.end_row();
@@ -213,7 +213,7 @@ impl Avm2ObjectWindow {
 
                 ui.label("Interfaces");
                 ui.vertical(|ui| {
-                    for interface in class.interfaces() {
+                    for interface in &*class.inner_class_definition().all_interfaces() {
                         ui.text_edit_singleline(
                             &mut interface
                                 .name()
@@ -437,10 +437,7 @@ fn object_name<'gc>(mc: &Mutation<'gc>, object: Object<'gc>) -> String {
             .to_qualified_name_err_message(mc)
             .to_string()
     } else {
-        let name = object
-            .instance_of_class_definition()
-            .map(|r| Cow::Owned(r.name().local_name().to_string()))
-            .unwrap_or(Cow::Borrowed("Object"));
+        let name = object.instance_class().name().local_name().to_string();
         format!("{} {:p}", name, object.as_ptr())
     }
 }

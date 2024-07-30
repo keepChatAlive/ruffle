@@ -10,9 +10,8 @@ use crate::display_object::avm1_button::Avm1Button;
 use crate::display_object::loader_display::LoaderDisplay;
 use crate::display_object::movie_clip::MovieClip;
 use crate::display_object::stage::Stage;
-use crate::display_object::{
-    Depth, DisplayObject, InteractiveObject, TDisplayObject, TInteractiveObject,
-};
+use crate::display_object::{Depth, DisplayObject, TDisplayObject, TInteractiveObject};
+use crate::focus_tracker::TabOrder;
 use crate::string::WStr;
 use crate::tag_utils::SwfMovie;
 use gc_arena::{Collect, Mutation};
@@ -486,8 +485,17 @@ pub trait TDisplayObjectContainer<'gc>:
         true
     }
 
+    /// The property `tabChildren` allows changing the behavior of
+    /// tab ordering hierarchically.
+    /// When set to `false`, it excludes the whole subtree represented by
+    /// the container from tab ordering.
+    ///
+    /// _NOTE:_
+    /// According to the AS2 documentation, it should affect only automatic tab ordering.
+    /// However, that does not seem to be the case, as it also affects custom ordering.
     fn is_tab_children(&self, context: &mut UpdateContext<'_, 'gc>) -> bool {
-        if context.swf.is_action_script_3() {
+        let this: DisplayObject<'_> = (*self).into();
+        if this.movie().is_action_script_3() {
             self.raw_container().tab_children
         } else {
             self.is_tab_children_avm1(context)
@@ -495,18 +503,15 @@ pub trait TDisplayObjectContainer<'gc>:
     }
 
     fn set_tab_children(&self, context: &mut UpdateContext<'_, 'gc>, value: bool) {
-        if context.swf.is_action_script_3() {
+        let this: DisplayObject<'_> = (*self).into();
+        if this.movie().is_action_script_3() {
             self.raw_container_mut(context.gc()).tab_children = value;
         } else {
-            tracing::warn!("Trying to set tab_children on an AVM1 object, this has no effect")
+            this.set_avm1_property(context, "tabChildren", value.into());
         }
     }
 
-    fn fill_tab_order(
-        &self,
-        tab_order: &mut Vec<InteractiveObject<'gc>>,
-        context: &mut UpdateContext<'_, 'gc>,
-    ) {
+    fn fill_tab_order(&self, tab_order: &mut TabOrder<'gc>, context: &mut UpdateContext<'_, 'gc>) {
         if !self.is_tab_children(context) {
             // AS3 docs say that objects with custom ordering (tabIndex set)
             // are included even when tabChildren is false.
@@ -521,7 +526,7 @@ pub trait TDisplayObjectContainer<'gc>:
             }
             if let Some(child) = child.as_interactive() {
                 if child.is_tabbable(context) {
-                    tab_order.push(child);
+                    tab_order.add_object(child);
                 }
             }
             if let Some(container) = child.as_container() {

@@ -1,7 +1,7 @@
 //! Function object impl
 
 use crate::avm2::activation::Activation;
-use crate::avm2::function::Executable;
+use crate::avm2::function::BoundMethod;
 use crate::avm2::method::{Method, NativeMethod};
 use crate::avm2::object::script_object::{ScriptObject, ScriptObjectData};
 use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
@@ -41,7 +41,7 @@ pub fn function_allocator<'gc>(
         activation.context.gc_context,
         FunctionObjectData {
             base,
-            exec: Executable::from_method(
+            exec: BoundMethod::from_method(
                 Method::Native(dummy),
                 activation.create_scopechain(),
                 None,
@@ -78,7 +78,7 @@ pub struct FunctionObjectData<'gc> {
     base: ScriptObjectData<'gc>,
 
     /// Executable code
-    exec: Executable<'gc>,
+    exec: BoundMethod<'gc>,
 
     /// Attached prototype (note: not the same thing as base object's proto)
     prototype: Option<Object<'gc>>,
@@ -95,13 +95,11 @@ impl<'gc> FunctionObject<'gc> {
         scope: ScopeChain<'gc>,
     ) -> Result<FunctionObject<'gc>, Error<'gc>> {
         let this = Self::from_method(activation, method, scope, None, None);
-        let es3_proto = ScriptObject::custom_object(
-            activation.context.gc_context,
-            // TODO: is this really a class-less object?
-            // (also: how much of "ES3 class-less object" is even true?)
-            None,
-            Some(activation.avm2().classes().object.prototype()),
-        );
+        let es3_proto = activation
+            .avm2()
+            .classes()
+            .object
+            .construct(activation, &[])?;
 
         this.0.write(activation.context.gc_context).prototype = Some(es3_proto);
 
@@ -120,7 +118,7 @@ impl<'gc> FunctionObject<'gc> {
         subclass_object: Option<ClassObject<'gc>>,
     ) -> FunctionObject<'gc> {
         let fn_class = activation.avm2().classes().function;
-        let exec = Executable::from_method(method, scope, receiver, subclass_object);
+        let exec = BoundMethod::from_method(method, scope, receiver, subclass_object);
 
         FunctionObject(GcCell::new(
             activation.context.gc_context,
@@ -169,7 +167,7 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
         Ok(Value::Object(Object::from(*self)))
     }
 
-    fn as_executable(&self) -> Option<Ref<Executable<'gc>>> {
+    fn as_executable(&self) -> Option<Ref<BoundMethod<'gc>>> {
         Some(Ref::map(self.0.read(), |r| &r.exec))
     }
 
@@ -202,8 +200,12 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
             proto
         };
 
-        let instance =
-            ScriptObject::custom_object(activation.context.gc_context, None, Some(prototype));
+        let instance = ScriptObject::custom_object(
+            activation.context.gc_context,
+            activation.avm2().classes().object.inner_class_definition(),
+            Some(activation.avm2().classes().object),
+            Some(prototype),
+        );
 
         self.call(instance.into(), arguments, activation)?;
 

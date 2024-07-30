@@ -2,11 +2,13 @@
 
 use crate::avm2::activation::Activation;
 use crate::avm2::bytearray::ByteArrayStorage;
-use crate::avm2::error::{argument_error, make_error_2008, range_error};
+use crate::avm2::error::{
+    argument_error, make_error_2004, make_error_2007, make_error_2008, range_error, Error2004Type,
+};
 use crate::avm2::filters::FilterAvm2Ext;
 pub use crate::avm2::object::bitmap_data_allocator;
 use crate::avm2::object::{BitmapDataObject, ByteArrayObject, Object, TObject, VectorObject};
-use crate::avm2::parameters::{null_parameter_error, ParametersExt};
+use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
 use crate::avm2::vector::VectorStorage;
 use crate::avm2::Error;
@@ -92,16 +94,12 @@ pub fn init<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     // We set the underlying BitmapData instance - we start out with a dummy BitmapDataWrapper,
     // which makes custom classes see a disposed BitmapData before they call super()
-    let name = this.instance_of_class_definition().map(|c| c.name());
-    let character = this
-        .instance_of()
-        .and_then(|t| {
-            activation
-                .context
-                .library
-                .avm2_class_registry()
-                .class_symbol(t)
-        })
+    let name = this.instance_class().name();
+    let character = activation
+        .context
+        .library
+        .avm2_class_registry()
+        .class_symbol(this.instance_class())
         .and_then(|(movie, chara_id)| {
             activation
                 .context
@@ -374,7 +372,7 @@ pub fn get_vector<'gc>(
             height,
         );
 
-        let value_type = activation.avm2().classes().uint;
+        let value_type = activation.avm2().classes().uint.inner_class_definition();
         let new_storage = VectorStorage::from_values(pixels, false, Some(value_type));
 
         return Ok(VectorObject::from_vector(new_storage, activation)?.into());
@@ -783,7 +781,7 @@ pub fn hit_test<'gc>(
                 .rectangle
                 .inner_class_definition();
 
-            if compare_object.is_of_type(point_class, &mut activation.context) {
+            if compare_object.is_of_type(point_class) {
                 let test_point = (
                     compare_object
                         .get_public_property("x", activation)?
@@ -800,7 +798,7 @@ pub fn hit_test<'gc>(
                     source_threshold,
                     test_point,
                 )));
-            } else if compare_object.is_of_type(rectangle_class, &mut activation.context) {
+            } else if compare_object.is_of_type(rectangle_class) {
                 let test_point = (
                     compare_object
                         .get_public_property("x", activation)?
@@ -1025,13 +1023,7 @@ pub fn draw_with_quality<'gc>(
         let quality = if let Some(quality) = args.try_get_string(activation, 6)? {
             match quality.parse() {
                 Ok(quality) => quality,
-                Err(_) => {
-                    return Err(Error::AvmError(argument_error(
-                        activation,
-                        "Error #2004: One of the parameters is invalid.",
-                        2004,
-                    )?));
-                }
+                Err(_) => return Err(make_error_2004(activation, Error2004Type::ArgumentError)),
             }
         } else {
             activation.context.stage.quality()
@@ -1391,7 +1383,7 @@ pub fn threshold<'gc>(
                     )?));
                 }
             } else {
-                return Err(null_parameter_error(activation, "operation"));
+                return Err(make_error_2007(activation, "operation"));
             };
 
             let (src_min_x, src_min_y, src_width, src_height) =

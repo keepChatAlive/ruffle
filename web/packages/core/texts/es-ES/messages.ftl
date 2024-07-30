@@ -10,10 +10,20 @@ update-ruffle = Actualizar Ruffle
 ruffle-demo = Demostración de web
 ruffle-desktop = Aplicación de Desktop
 ruffle-wiki = Ver la página wiki
-enable-hardware-acceleration = Al parecer, la aceleración de hardware no esta habilitada. Puede que Ruffle funcione, pero será extremadamente lento. Puedes averiguar como habilitar la aceleración de hardware al entrar al enlace.
+enable-hardware-acceleration = Al parecer, la aceleración de hardware está deshabilitada. Puede que Ruffle funcione, pero este podría funcionar muy lentamente. Puedes averiguar como habilitar aceleración de hardware presionando el enlace:
+enable-hardware-acceleration-link = Preguntas frecuentes sobre la aceleración de hardware en Chrome
 view-error-details = Ver los detalles del error
 open-in-new-tab = Abrir en una pestaña nueva
 click-to-unmute = Haz clic para dejar de silenciar
+clipboard-message-title = Para copiar y pegar en Ruffle
+clipboard-message-description =
+    { $variant ->
+       *[unsupported] Este navegador no apoya acceso completo al portapapeles,
+        [access-denied] Se ha denegado el acceso al portapapeles,
+    } pero siempre se puede utilizar estos atajos:
+clipboard-message-copy = Para copiar
+clipboard-message-cut = Para cortar
+clipboard-message-paste = Para pegar
 error-file-protocol =
     Parece que está ejecutando Ruffle en el protocolo "archivo:".
     Esto no funciona porque los navegadores bloquean que muchas características funcionen por razones de seguridad.

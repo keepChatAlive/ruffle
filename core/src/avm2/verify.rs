@@ -14,7 +14,7 @@ use gc_arena::{Collect, Gc};
 use std::collections::{HashMap, HashSet};
 use swf::avm2::read::Reader;
 use swf::avm2::types::{
-    Index, MethodFlags as AbcMethodFlags, Multiname as AbcMultiname, Op as AbcOp,
+    Class as AbcClass, Index, MethodFlags as AbcMethodFlags, Multiname as AbcMultiname, Op as AbcOp,
 };
 use swf::error::Error as AbcReadError;
 
@@ -45,12 +45,23 @@ enum ByteInfo {
     OpStart(AbcOp),
     OpContinue,
 
+    OpStartNonJumpable(AbcOp),
+
     NotYetReached,
 }
 
-pub enum JumpSources {
-    Known(Vec<i32>),
-    Unknown,
+impl ByteInfo {
+    fn get_op(&self) -> Option<&AbcOp> {
+        match self {
+            ByteInfo::OpStart(op) | ByteInfo::OpStartNonJumpable(op) => Some(op),
+            _ => None,
+        }
+    }
+}
+
+pub enum JumpSource {
+    JumpFrom(i32),
+    ExceptionTarget,
 }
 
 pub fn verify_method<'gc>(
@@ -89,6 +100,8 @@ pub fn verify_method<'gc>(
     let resolved_param_config = resolve_param_config(activation, method.signature())?;
     let resolved_return_type = resolve_return_type(activation, &method.return_type)?;
 
+    let mut seen_exception_indices = HashSet::new();
+
     let mut worklist = vec![0];
 
     let mut byte_info = vec![ByteInfo::NotYetReached; body.code.len()];
@@ -120,16 +133,21 @@ pub fn verify_method<'gc>(
                 Err(_) => unreachable!(),
             };
 
-            for exception in body.exceptions.iter() {
+            for (exception_index, exception) in body.exceptions.iter().enumerate() {
                 // If this op is in the to..from and it can throw an error,
                 // add the exception's target to the worklist.
                 if exception.from_offset as i32 <= previous_position
                     && previous_position < exception.to_offset as i32
                     && op_can_throw_error(&op)
-                    && !seen_targets.contains(&(exception.target_offset as i32))
                 {
-                    worklist.push(exception.target_offset);
-                    seen_targets.insert(exception.target_offset as i32);
+                    if !seen_targets.contains(&(exception.target_offset as i32)) {
+                        worklist.push(exception.target_offset);
+                        seen_targets.insert(exception.target_offset as i32);
+                    }
+
+                    // Keep track of all the valid exceptions, and only verify
+                    // them- this is more lenient than avmplus, but still safe.
+                    seen_exception_indices.insert(exception_index);
                 }
             }
 
@@ -152,7 +170,10 @@ pub fn verify_method<'gc>(
 
                 let lookedup_target_info = byte_info.get(target_position as usize);
 
-                if matches!(lookedup_target_info, Some(ByteInfo::OpContinue)) {
+                if matches!(
+                    lookedup_target_info,
+                    Some(ByteInfo::OpContinue | ByteInfo::OpStartNonJumpable(_))
+                ) {
                     return Err(make_error_1021(activation));
                 }
 
@@ -290,7 +311,7 @@ pub fn verify_method<'gc>(
                     }
                 }
 
-                AbcOp::GetLex { index } | AbcOp::FindDef { index } => {
+                AbcOp::FindDef { index } => {
                     let multiname = method
                         .translation_unit()
                         .pool_maybe_uninitialized_multiname(index, &mut activation.context)?;
@@ -302,6 +323,34 @@ pub fn verify_method<'gc>(
                             1078,
                         )?));
                     }
+                }
+
+                AbcOp::GetLex { index } => {
+                    let multiname = method
+                        .translation_unit()
+                        .pool_maybe_uninitialized_multiname(index, &mut activation.context)?;
+
+                    if multiname.has_lazy_component() {
+                        return Err(Error::AvmError(verify_error(
+                            activation,
+                            "Error #1078: Illegal opcode/multiname combination.",
+                            1078,
+                        )?));
+                    }
+
+                    // Split this `GetLex` into a `FindPropStrict` and a `GetProperty`.
+                    // A `GetLex` is guaranteed to take up at least 2 bytes. We need
+                    // one byte for the opcode and at least one byte for the multiname
+                    // index. Overwrite the op registered at the opcode byte with a
+                    // `FindPropStrict` op, and register a non-jumpable `GetProperty`
+                    // op at the next byte. This isn't the best way to do it, but it's
+                    // simpler than actually emitting ops and rewriting the jump offsets
+                    // to match.
+                    assert!(bytes_read > 1);
+                    byte_info[previous_position as usize] =
+                        ByteInfo::OpStart(AbcOp::FindPropStrict { index });
+                    byte_info[(previous_position + 1) as usize] =
+                        ByteInfo::OpStartNonJumpable(AbcOp::GetProperty { index });
                 }
 
                 AbcOp::GetOuterScope { index } => {
@@ -349,90 +398,21 @@ pub fn verify_method<'gc>(
 
     let mut new_code = Vec::new();
     for (i, info) in byte_info.iter().enumerate() {
-        if let ByteInfo::OpStart(c) = info {
+        if let Some(op) = info.get_op() {
             byte_offset_to_idx.insert(i, new_code.len() as i32);
-            new_code.push(c.clone());
+            new_code.push(op.clone());
             idx_to_byte_offset.push(i);
         }
     }
 
     // Record a target->sources mapping of all jump
     // targets- this will be used in the optimizer.
-    let mut potential_jump_targets: HashMap<i32, JumpSources> = HashMap::new();
+    let mut potential_jump_targets: HashMap<i32, Vec<JumpSource>> = HashMap::new();
 
     // Handle exceptions
     let mut new_exceptions = Vec::new();
-    for exception in body.exceptions.iter() {
-        // NOTE: This is actually wrong, we should be using the byte offsets in
-        // `Activation::handle_err`, not the opcode offsets. avmplus allows for from/to
-        // (but not targets) that aren't on a opcode, and some obfuscated SWFs have them.
-        // FFDEC handles them correctly, stepping forward byte-by-byte until it reaches
-        // the next opcode. This does the same (stepping byte-by-byte), but it would
-        // be better to directly use the byte offsets when handling exceptions.
-        let mut from_offset = None;
-
-        let mut offs = 0;
-        while from_offset.is_none() {
-            from_offset = byte_offset_to_idx
-                .get(&((exception.from_offset + offs) as usize))
-                .copied();
-
-            offs += 1;
-            if (exception.from_offset + offs) as usize >= body.code.len() {
-                return Err(make_error_1054(activation));
-            }
-        }
-
-        // Now for the `to_offset`.
-        let mut to_offset = None;
-
-        let mut offs = 0;
-        while to_offset.is_none() {
-            to_offset = byte_offset_to_idx
-                .get(&((exception.to_offset + offs) as usize))
-                .copied();
-
-            offs += 1;
-            if (exception.to_offset + offs) as usize >= body.code.len() {
-                return Err(make_error_1054(activation));
-            }
-        }
-
-        let new_from_offset = from_offset.unwrap() as u32;
-        let new_to_offset = to_offset.unwrap() as u32;
-
-        if new_to_offset < new_from_offset {
-            return Err(make_error_1054(activation));
-        }
-
-        let maybe_new_target_offset = byte_offset_to_idx
-            .get(&(exception.target_offset as usize))
-            .copied();
-
-        // The large "NOTE" comment below is also relevant here
-        if let Some(new_target_offset) = maybe_new_target_offset {
-            // If this is a reachable target offset, insert it into the list
-            // of potential jump targets. TODO: Add sources, better handle
-            // the scope stack and stack being cleared after jumps
-            potential_jump_targets.insert(new_target_offset, JumpSources::Unknown);
-        }
-
-        let new_target_offset = maybe_new_target_offset.unwrap_or(0);
-
-        // NOTE: That `unwrap_or` is definitely reachable, e.g. in a case where
-        // the target offset is unreachable (see the test "verification"), but it
-        // might also be reachable in cases where the target offset will actually
-        // be jumped to. Any SWF that does this is extremely cursed and should
-        // VerifyError in FP (though I haven't been able to confirm that it does),
-        // so we probably don't need to worry about that case.
-
-        if exception.target_offset < exception.to_offset {
-            return Err(make_error_1054(activation));
-        }
-
-        if new_target_offset as usize >= new_code.len() {
-            return Err(make_error_1054(activation));
-        }
+    for (exception_index, exception) in body.exceptions.iter().enumerate() {
+        // Resolve the variable name and target class.
 
         let target_class = if exception.type_name.0 == 0 {
             None
@@ -491,6 +471,95 @@ pub fn verify_method<'gc>(
             Some(QName::new(namespaces[0], name))
         };
 
+        if !seen_exception_indices.contains(&exception_index) {
+            // We need to push an exception because otherwise `newcatch` ops can try to
+            // read it, but we can give it dummy from/to/target offsets because no code
+            // can actually trigger it (and we might not even have valid offsets anyway).
+            new_exceptions.push(Exception {
+                from_offset: 0,
+                to_offset: 0,
+                target_offset: 0,
+                variable_name,
+                target_class,
+            });
+            continue;
+        }
+
+        // Now resolve the offsets.
+
+        // NOTE: This is actually wrong, we should be using the byte offsets in
+        // `Activation::handle_err`, not the opcode offsets. avmplus allows for from/to
+        // (but not targets) that aren't on a opcode, and some obfuscated SWFs have them.
+        // FFDEC handles them correctly, stepping forward byte-by-byte until it reaches
+        // the next opcode. This does the same (stepping byte-by-byte), but it would
+        // be better to directly use the byte offsets when handling exceptions.
+        let mut from_offset = None;
+
+        let mut offs = 0;
+        while from_offset.is_none() {
+            from_offset = byte_offset_to_idx
+                .get(&((exception.from_offset + offs) as usize))
+                .copied();
+
+            offs += 1;
+            if (exception.from_offset + offs) as usize >= body.code.len() {
+                return Err(make_error_1054(activation));
+            }
+        }
+
+        // Now for the `to_offset`.
+        let mut to_offset = None;
+
+        let mut offs = 0;
+        while to_offset.is_none() {
+            to_offset = byte_offset_to_idx
+                .get(&((exception.to_offset + offs) as usize))
+                .copied();
+
+            offs += 1;
+            if (exception.to_offset + offs) as usize >= body.code.len() {
+                return Err(make_error_1054(activation));
+            }
+        }
+
+        let new_from_offset = from_offset.unwrap() as u32;
+        let new_to_offset = to_offset.unwrap() as u32;
+
+        if new_to_offset < new_from_offset {
+            return Err(make_error_1054(activation));
+        }
+
+        let maybe_new_target_offset = byte_offset_to_idx
+            .get(&(exception.target_offset as usize))
+            .copied();
+
+        // The large "NOTE" comment below is also relevant here
+        if let Some(new_target_offset) = maybe_new_target_offset {
+            // If this is a reachable target offset, insert it into the list
+            // of potential jump targets.
+            potential_jump_targets
+                .entry(new_target_offset)
+                .or_default()
+                .push(JumpSource::ExceptionTarget);
+        }
+
+        let new_target_offset = maybe_new_target_offset.unwrap_or(0);
+
+        // NOTE: That `unwrap_or` is definitely reachable, e.g. in a case where
+        // the target offset is unreachable (see the test "verification"), but it
+        // might also be reachable in cases where the target offset will actually
+        // be jumped to. Any SWF that does this is extremely cursed and should
+        // VerifyError in FP (though I haven't been able to confirm that it does),
+        // so we probably don't need to worry about that case.
+
+        if exception.target_offset < exception.to_offset {
+            return Err(make_error_1054(activation));
+        }
+
+        if new_target_offset as usize >= new_code.len() {
+            return Err(make_error_1054(activation));
+        }
+
         new_exceptions.push(Exception {
             from_offset: new_from_offset,
             to_offset: new_to_offset,
@@ -543,25 +612,29 @@ pub fn verify_method<'gc>(
             | AbcOp::Jump { offset } => {
                 let adjusted_result = adjust_jump_to_idx(i, *offset, true)?;
                 *offset = adjusted_result.1;
-                if let Some(jump_sources) = potential_jump_targets.get_mut(&adjusted_result.0) {
-                    if let JumpSources::Known(sources) = jump_sources {
-                        sources.push(i);
-                    }
-                } else {
-                    potential_jump_targets.insert(adjusted_result.0, JumpSources::Known(vec![i]));
-                }
+
+                potential_jump_targets
+                    .entry(adjusted_result.0)
+                    .or_default()
+                    .push(JumpSource::JumpFrom(i));
             }
             AbcOp::LookupSwitch(ref mut lookup_switch) => {
-                // TODO: Add i to possible sources, like in the branch ops
-
                 let adjusted_default = adjust_jump_to_idx(i, lookup_switch.default_offset, false)?;
                 lookup_switch.default_offset = adjusted_default.1;
-                potential_jump_targets.insert(adjusted_default.0, JumpSources::Unknown);
+
+                potential_jump_targets
+                    .entry(adjusted_default.0)
+                    .or_default()
+                    .push(JumpSource::JumpFrom(i));
 
                 for case in lookup_switch.case_offsets.iter_mut() {
                     let adjusted_case = adjust_jump_to_idx(i, *case, false)?;
                     *case = adjusted_case.1;
-                    potential_jump_targets.insert(adjusted_case.0, JumpSources::Unknown);
+
+                    potential_jump_targets
+                        .entry(adjusted_case.0)
+                        .or_default()
+                        .push(JumpSource::JumpFrom(i));
                 }
             }
             _ => {}
@@ -780,6 +853,14 @@ fn pool_string<'gc>(
     translation_unit.pool_string(index.0, &mut activation.borrow_gc())
 }
 
+fn pool_class<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    translation_unit: TranslationUnit<'gc>,
+    index: Index<AbcClass>,
+) -> Result<Class<'gc>, Error<'gc>> {
+    translation_unit.load_class(index.0, activation)
+}
+
 fn resolve_op<'gc>(
     activation: &mut Activation<'_, 'gc>,
     translation_unit: TranslationUnit<'gc>,
@@ -922,21 +1003,20 @@ fn resolve_op<'gc>(
 
             Op::FindPropStrict { multiname }
         }
-        AbcOp::GetLex { index } => {
-            let multiname = pool_multiname(activation, translation_unit, index)?;
-            // Verifier guarantees that multiname was non-lazy
-
-            Op::GetLex { multiname }
+        AbcOp::GetLex { .. } => {
+            unreachable!("Verifier emits FindPropStrict and GetProperty instead of GetLex")
         }
         AbcOp::GetDescendants { index } => {
             let multiname = pool_multiname(activation, translation_unit, index)?;
 
             Op::GetDescendants { multiname }
         }
-        AbcOp::GetSlot { index } => Op::GetSlot { index },
-        AbcOp::SetSlot { index } => Op::SetSlot { index },
-        AbcOp::GetGlobalSlot { index } => Op::GetGlobalSlot { index },
-        AbcOp::SetGlobalSlot { index } => Op::SetGlobalSlot { index },
+        // Turn 1-based representation into 0-based representation
+        AbcOp::GetSlot { index } => Op::GetSlot { index: index - 1 },
+        AbcOp::SetSlot { index } => Op::SetSlot { index: index - 1 },
+        AbcOp::GetGlobalSlot { index } => Op::GetGlobalSlot { index: index - 1 },
+        AbcOp::SetGlobalSlot { index } => Op::SetGlobalSlot { index: index - 1 },
+
         AbcOp::Construct { num_args } => Op::Construct { num_args },
         AbcOp::ConstructProp { index, num_args } => {
             let multiname = pool_multiname(activation, translation_unit, index)?;
@@ -951,7 +1031,10 @@ fn resolve_op<'gc>(
         AbcOp::NewActivation => Op::NewActivation,
         AbcOp::NewObject { num_args } => Op::NewObject { num_args },
         AbcOp::NewFunction { index } => Op::NewFunction { index },
-        AbcOp::NewClass { index } => Op::NewClass { index },
+        AbcOp::NewClass { index } => {
+            let class = pool_class(activation, translation_unit, index)?;
+            Op::NewClass { class }
+        }
         AbcOp::ApplyType { num_types } => Op::ApplyType { num_types },
         AbcOp::NewArray { num_args } => Op::NewArray { num_args },
         AbcOp::CoerceA => Op::CoerceA,

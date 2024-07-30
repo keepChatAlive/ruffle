@@ -6,7 +6,7 @@ import {
     getPolyfillOptions,
 } from "./ruffle-player";
 import { FLASH_ACTIVEX_CLASSID } from "./flash-identifiers";
-import { registerElement } from "./register-element";
+import { registerElement } from "./internal/register-element";
 import { RuffleEmbed } from "./ruffle-embed";
 import { isSwf } from "./swf-utils";
 
@@ -65,16 +65,6 @@ function paramsOf(elem: Element): Record<string, string> {
  */
 export class RuffleObject extends RufflePlayer {
     private params: Record<string, string> = {};
-
-    /**
-     * Constructs a new Ruffle flash player for insertion onto the page.
-     *
-     * This specific class tries to polyfill existing `<object>` tags,
-     * and should not be used. Prefer [[RufflePlayer]] instead.
-     */
-    constructor() {
-        super();
-    }
 
     /**
      * @ignore
@@ -137,6 +127,16 @@ export class RuffleObject extends RufflePlayer {
         });
 
         return result;
+    }
+
+    /**
+     * Polyfill of HTMLObjectElement.
+     *
+     * @ignore
+     * @internal
+     */
+    override get nodeName(): string {
+        return "OBJECT";
     }
 
     /**
@@ -254,9 +254,9 @@ export class RuffleObject extends RufflePlayer {
      */
     static fromNativeObjectElement(elem: Element): RuffleObject {
         const externalName = registerElement("ruffle-object", RuffleObject);
-        const ruffleObj: RuffleObject = <RuffleObject>(
-            document.createElement(externalName)
-        );
+        const ruffleObj: RuffleObject = document.createElement(
+            externalName,
+        ) as RuffleObject;
 
         // Avoid copying embeds-inside-objects to avoid double polyfilling.
         for (const embedElem of Array.from(

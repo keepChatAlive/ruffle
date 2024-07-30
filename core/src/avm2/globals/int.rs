@@ -229,6 +229,7 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
             mc,
         ),
         Method::from_builtin(class_init, "<int class initializer>", mc),
+        activation.avm2().classes().class.inner_class_definition(),
         mc,
     );
 
@@ -272,6 +273,18 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
         activation.avm2().as3_namespace,
         AS3_INSTANCE_METHODS,
     );
+
+    class.mark_traits_loaded(activation.context.gc_context);
+    class
+        .init_vtable(&mut activation.context)
+        .expect("Native class's vtable should initialize");
+
+    let c_class = class.c_class().expect("Class::new returns an i_class");
+
+    c_class.mark_traits_loaded(activation.context.gc_context);
+    c_class
+        .init_vtable(&mut activation.context)
+        .expect("Native class's vtable should initialize");
 
     class
 }

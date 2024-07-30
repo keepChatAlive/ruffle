@@ -5,6 +5,7 @@ export interface Options extends BaseLoadOptions {
     ruffleEnable: boolean;
     ignoreOptout: boolean;
     autostart: boolean;
+    showReloadButton: boolean;
 }
 
 interface OptionElement<T> {
@@ -156,6 +157,7 @@ export async function bindOptions(
         // Prevent transition on load.
         // Method from https://stackoverflow.com/questions/11131875.
         element.label.classList.add("notransition");
+        // eslint-disable-next-line @typescript-eslint/no-unused-expressions
         element.label.offsetHeight; // Trigger a reflow, flushing the CSS changes.
         element.label.classList.remove("notransition");
 

@@ -852,7 +852,16 @@ impl<'gc> Value<'gc> {
                     AvmString::new_utf8(activation.context.gc_context, n.to_string())
                 }
             }
-            Value::Integer(i) => AvmString::new_utf8(activation.context.gc_context, i.to_string()),
+            Value::Integer(i) => {
+                if *i >= 0 && *i < 10 {
+                    activation
+                        .context
+                        .interner
+                        .get_char(activation.context.gc_context, '0' as u16 + *i as u16)
+                } else {
+                    AvmString::new_utf8(activation.context.gc_context, i.to_string())
+                }
+            }
             Value::String(s) => *s,
             Value::Object(_) => self
                 .coerce_to_primitive(Some(Hint::String), activation)?
@@ -1013,7 +1022,7 @@ impl<'gc> Value<'gc> {
         }
 
         if matches!(self, Value::Undefined) || matches!(self, Value::Null) {
-            if class == activation.avm2().classes().void.inner_class_definition() {
+            if class == activation.avm2().classes().void_def {
                 return Ok(Value::Undefined);
             }
             return Ok(Value::Null);
@@ -1024,7 +1033,7 @@ impl<'gc> Value<'gc> {
         }
 
         if let Ok(object) = self.coerce_to_object(activation) {
-            if object.is_of_type(class, &mut activation.context) {
+            if object.is_of_type(class) {
                 return Ok(*self);
             }
         }
@@ -1059,7 +1068,7 @@ impl<'gc> Value<'gc> {
         match self {
             Value::Number(_) => true,
             Value::Integer(_) => true,
-            Value::Object(o) => o.as_primitive().map(|p| p.is_number()).unwrap_or(false),
+            Value::Object(o) => o.as_primitive().map_or(false, |p| p.is_number()),
             _ => false,
         }
     }
@@ -1071,7 +1080,7 @@ impl<'gc> Value<'gc> {
         match self {
             Value::Number(n) => *n == (*n as u32 as f64),
             Value::Integer(i) => *i >= 0,
-            Value::Object(o) => o.as_primitive().map(|p| p.is_u32()).unwrap_or(false),
+            Value::Object(o) => o.as_primitive().map_or(false, |p| p.is_u32()),
             _ => false,
         }
     }
@@ -1083,7 +1092,7 @@ impl<'gc> Value<'gc> {
         match self {
             Value::Number(n) => *n == (*n as i32 as f64),
             Value::Integer(_) => true,
-            Value::Object(o) => o.as_primitive().map(|p| p.is_i32()).unwrap_or(false),
+            Value::Object(o) => o.as_primitive().map_or(false, |p| p.is_i32()),
             _ => false,
         }
     }
@@ -1110,13 +1119,13 @@ impl<'gc> Value<'gc> {
         }
 
         if let Value::Undefined = self {
-            if type_object == activation.avm2().classes().void.inner_class_definition() {
+            if type_object == activation.avm2().classes().void_def {
                 return true;
             }
         }
 
         if let Ok(o) = self.coerce_to_object(activation) {
-            o.is_of_type(type_object, &mut activation.context)
+            o.is_of_type(type_object)
         } else {
             false
         }
@@ -1151,7 +1160,6 @@ impl<'gc> Value<'gc> {
         // for XML and XMLList types. Because they are objects in Ruffle we
         // have to be a bit more complicated and factor out the code into
         // a separate method.
-        // TODO: QName handling
         if let Value::Object(obj) = self {
             if let Some(xml_list_obj) = obj.as_xml_list_object() {
                 return xml_list_obj.equals(other, activation);
@@ -1161,11 +1169,16 @@ impl<'gc> Value<'gc> {
                 return xml_obj.abstract_eq(other, activation);
             }
 
+            if let Some(self_qname) = obj.as_qname_object() {
+                if let Value::Object(Object::QNameObject(other_qname)) = other {
+                    return Ok(self_qname.uri() == other_qname.uri()
+                        && self_qname.local_name() == other_qname.local_name());
+                }
+            }
+
             if let Some(self_ns) = obj.as_namespace_object() {
-                if let Value::Object(other_obj) = other {
-                    if let Some(other_ns) = other_obj.as_namespace_object() {
-                        return Ok(self_ns.namespace().as_uri() == other_ns.namespace().as_uri());
-                    }
+                if let Value::Object(Object::NamespaceObject(other_ns)) = other {
+                    return Ok(self_ns.namespace().as_uri() == other_ns.namespace().as_uri());
                 }
             }
         }

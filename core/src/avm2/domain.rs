@@ -263,7 +263,7 @@ impl<'gc> Domain<'gc> {
         activation: &mut Activation<'_, 'gc>,
         name: QName<'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
-        let (name, mut script) = self.find_defining_script(activation, &name.into())?;
+        let (name, script) = self.find_defining_script(activation, &name.into())?;
         let globals = script.globals(&mut activation.context)?;
 
         globals.get_property(&name.into(), activation)
@@ -293,12 +293,13 @@ impl<'gc> Domain<'gc> {
         }
         // FIXME - is this the correct api version?
         let api_version = activation.avm2().root_api_version;
-        let name = QName::from_qualified_name(name, api_version, activation);
+        let name = QName::from_qualified_name(name, api_version, &mut activation.context);
 
         let res = self.get_defined_value(activation, name);
 
         if let Some(type_name) = type_name {
-            let type_qname = QName::from_qualified_name(type_name, api_version, activation);
+            let type_qname =
+                QName::from_qualified_name(type_name, api_version, &mut activation.context);
             let type_class = self.get_defined_value(activation, type_qname)?;
             if let Ok(res) = res {
                 let class = res.as_object().ok_or_else(|| {

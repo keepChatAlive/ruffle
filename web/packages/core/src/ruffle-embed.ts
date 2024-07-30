@@ -5,7 +5,7 @@ import {
     RufflePlayer,
     workaroundYoutubeMixedContent,
 } from "./ruffle-player";
-import { registerElement } from "./register-element";
+import { registerElement } from "./internal/register-element";
 import { isSwf } from "./swf-utils";
 
 /**
@@ -17,16 +17,6 @@ import { isSwf } from "./swf-utils";
  * @internal
  */
 export class RuffleEmbed extends RufflePlayer {
-    /**
-     * Constructs a new Ruffle flash player for insertion onto the page.
-     *
-     * This specific class tries to polyfill existing `<embed>` tags,
-     * and should not be used. Prefer [[RufflePlayer]] instead.
-     */
-    constructor() {
-        super();
-    }
-
     /**
      * @ignore
      * @internal
@@ -46,7 +36,17 @@ export class RuffleEmbed extends RufflePlayer {
     }
 
     /**
-     * Polyfill of HTMLObjectElement.
+     * Polyfill of HTMLEmbedElement.
+     *
+     * @ignore
+     * @internal
+     */
+    override get nodeName(): string {
+        return "EMBED";
+    }
+
+    /**
+     * Polyfill of HTMLEmbedElement.
      *
      * @ignore
      * @internal
@@ -56,7 +56,7 @@ export class RuffleEmbed extends RufflePlayer {
     }
 
     /**
-     * Polyfill of HTMLObjectElement.
+     * Polyfill of HTMLEmbedElement.
      *
      * @ignore
      * @internal
@@ -138,7 +138,7 @@ export class RuffleEmbed extends RufflePlayer {
      */
     static fromNativeEmbedElement(elem: Element): RuffleEmbed {
         const externalName = registerElement("ruffle-embed", RuffleEmbed);
-        const ruffleObj = <RuffleEmbed>document.createElement(externalName);
+        const ruffleObj = document.createElement(externalName) as RuffleEmbed;
         ruffleObj.copyElement(elem);
 
         return ruffleObj;

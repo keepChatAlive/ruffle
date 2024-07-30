@@ -55,14 +55,15 @@ thiserror = { workspace = true }
 base64 = "0.22.0"
 async-channel = { workspace = true }
 futures-util = { version = "0.3.30", features = ["sink"] }
-gloo-net =  { version = "0.5.0", default-features = false, features = ["websocket"] }
+gloo-net =  { version = "0.6.0", default-features = false, features = ["websocket"] }
 rfd = { version = "0.14.1", features = ["file-handle-inner"] }
 wasm-streams = "0.4.0"
 futures = { workspace = true }
+zip = { version = "2.1.5", default-features = false}
 
 [dependencies.ruffle_core]
 path = "../core"
-features = ["audio", "mp3", "nellymoser", "default_compatibility_rules", "default_font"]
+features = ["audio", "mp3", "nellymoser", "default_compatibility_rules", "default_font", "serde"]
 
 [dependencies.web-sys]
 version = "0.3.69"
@@ -73,7 +74,7 @@ features = [
     "EventTarget", "GainNode", "Headers", "HtmlCanvasElement", "HtmlDocument", "HtmlElement", "HtmlFormElement",
     "HtmlInputElement", "HtmlTextAreaElement", "KeyboardEvent", "Location", "PointerEvent",
     "Request", "RequestInit", "Response", "Storage", "WheelEvent", "Window", "ReadableStream", "RequestCredentials",
-    "Url",
+    "Url", "Clipboard", "FocusEvent"
 ]
 
 [package.metadata.cargo-machete]

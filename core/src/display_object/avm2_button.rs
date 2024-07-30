@@ -1,8 +1,12 @@
+use super::container::dispatch_added_to_stage_event;
+use super::dispatch_added_event_only;
+use super::interactive::Avm2MousePick;
 use crate::avm1::Object as Avm1Object;
 use crate::avm2::{
     Activation as Avm2Activation, ClassObject as Avm2ClassObject, Object as Avm2Object,
     StageObject as Avm2StageObject, Value as Avm2Value,
 };
+use crate::backend::audio::AudioManager;
 use crate::backend::ui::MouseCursor;
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::avm1_button::{ButtonState, ButtonTracking};
@@ -23,10 +27,6 @@ use gc_arena::{Collect, Gc, Mutation};
 use ruffle_render::filters::Filter;
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::sync::Arc;
-
-use super::container::dispatch_added_to_stage_event;
-use super::dispatch_added_event_only;
-use super::interactive::Avm2MousePick;
 
 #[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
@@ -752,8 +752,10 @@ impl<'gc> TInteractiveObject<'gc> for Avm2Button<'gc> {
         let (new_state, sound) = match event {
             ClipEvent::DragOut { .. } => (ButtonState::Over, None),
             ClipEvent::DragOver { .. } => (ButtonState::Down, None),
-            ClipEvent::Press => (ButtonState::Down, static_data.over_to_down_sound.as_ref()),
-            ClipEvent::Release => (ButtonState::Over, static_data.down_to_over_sound.as_ref()),
+            ClipEvent::Press { .. } => (ButtonState::Down, static_data.over_to_down_sound.as_ref()),
+            ClipEvent::Release { .. } => {
+                (ButtonState::Over, static_data.down_to_over_sound.as_ref())
+            }
             ClipEvent::ReleaseOutside => (ButtonState::Up, static_data.over_to_up_sound.as_ref()),
             ClipEvent::MouseUpInside => (ButtonState::Up, static_data.over_to_up_sound.as_ref()),
             ClipEvent::RollOut { .. } => (ButtonState::Up, static_data.over_to_up_sound.as_ref()),
@@ -763,7 +765,9 @@ impl<'gc> TInteractiveObject<'gc> for Avm2Button<'gc> {
             _ => return ClipEventResult::NotHandled,
         };
 
-        self.0.play_sound(context, sound);
+        if let Some((id, sound_info)) = sound {
+            AudioManager::perform_sound_event(self.into(), context, *id, sound_info);
+        }
         let old_state = self.0.state.get();
 
         if old_state != new_state {
@@ -824,23 +828,13 @@ impl<'gc> TInteractiveObject<'gc> for Avm2Button<'gc> {
     fn tab_enabled_default(&self, _context: &mut UpdateContext<'_, 'gc>) -> bool {
         true
     }
-}
 
-impl<'gc> Avm2ButtonData<'gc> {
-    fn play_sound(&self, context: &mut UpdateContext<'_, 'gc>, sound: Option<&swf::ButtonSound>) {
-        if let Some((id, sound_info)) = sound {
-            if let Some(sound_handle) = context
-                .library
-                .library_for_movie_mut(self.movie())
-                .get_sound(*id)
-            {
-                let _ = context.start_sound(sound_handle, sound_info, None, None);
-            }
-        }
-    }
-
-    fn movie(&self) -> Arc<SwfMovie> {
-        self.static_data.swf.clone()
+    fn highlight_bounds(self) -> Rectangle<Twips> {
+        let hit_area = self.0.hit_area.get();
+        let hit_bounds = hit_area
+            .map(|hit| hit.bounds())
+            .unwrap_or(Rectangle::INVALID);
+        self.local_to_global_matrix() * hit_bounds
     }
 }
 

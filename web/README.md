@@ -80,6 +80,18 @@ Some ways to install Binaryen:
 
 Just make sure the `wasm-opt` program is in `$PATH`, and that it works.
 
+#### Optional features
+
+##### `jpegxr`
+
+The release version of the extension is compiled with `jpegxr`.
+To enable it, set the the env `CARGO_FEATURES="jpegxr"`.
+
+Windows dependencies:
+
+- Install LLVM and add the full path of its `bin` folder (example: `C:\Program Files\LLVM-18.1.6\bin`) to your env `PATH`.
+- Set env `LIBCLANG_PATH` with the same `bin` folder.
+
 ### Building
 
 In this project, you may run the following commands to build all packages:
@@ -100,9 +112,38 @@ run a demo locally with `npm run demo`, or [install the extension in your browse
 
 ### Testing
 
-To run all of the tests in this project, we currently require that you have [Chrome installed to its default location](https://www.google.com/chrome/).
+There are two parts of tests to this project:
+- Regular node tests, ran through `npm run test`. You must have built everything first as above. These have no special requirements.
+- Browser based tests, ran through `npm run wdio` with extra arguments as below. These take longer to run and require some setup.
 
-First, ensure you've build every package (see above), and then run `npm run test` to run the full suite of tests.
+## Browser Based Tests
+There are full integration tests that require a browser to run. We don't make any assumptions about your environment, and so you must specify it yourself.
+
+To run these tests, first build the project as above, then use `npm run wdio -- --arg1 --arg2` etc.
+
+### Local Browsers
+These are additive - you can specify multiple at the same time. You must have the given browsers installed locally though, or it will fail.
+
+- `--chrome` for Chrome
+- `--firefox` for Firefox
+- `--edge` for Edge
+
+### BrowserStack (Mobile Browsers)
+To run tests on mobile devices on BrowserStack, pass the `--browserstack` argument.
+We also have our "minimum supported desktop browsers" available too, by additionally passing `--oldVersions`.
+
+You will need a BrowserStack account (Maintainers may contact @Dinnerbone on Discord for an invite to the Ruffle team),
+and set the appropriate values to `BROWSERSTACK_USERNAME` and `BROWSERSTACK_ACCESS_KEY` environment variables.
+
+### Other Options
+Pass `--headless` to hide the browser windows. This is useful and recommended in almost every case, but if you want to debug why a test fails then it's very useful to not pass this.
+
+Pass `--spec <name>` to filter a test based on name. For example, `--spec external_interface` to tests with `external_interface` in the path.
+
+
+### Testing tips!
+If debugging a failing test, use `await browser.pause(100000);` in the test file to pause it, and don't start the test with `--headless`.
+That way you can actually see what's happening, and manually get involved to debug it. 
 
 ## Structure
 
