@@ -13,7 +13,6 @@ use crate::string::{AvmAtom, AvmString, WStr};
 use gc_arena::{Collect, Mutation};
 use num_bigint::BigInt;
 use num_traits::{ToPrimitive, Zero};
-use std::cell::Ref;
 use std::mem::size_of;
 use swf::avm2::types::{DefaultValue as AbcDefaultValue, Index};
 
@@ -535,14 +534,14 @@ pub fn abc_default_value<'gc>(
         | AbcDefaultValue::Explicit(ns)
         | AbcDefaultValue::StaticProtected(ns)
         | AbcDefaultValue::Private(ns) => {
-            let ns = translation_unit.pool_namespace(*ns, &mut activation.context)?;
+            let ns = translation_unit.pool_namespace(*ns, activation.context)?;
             NamespaceObject::from_namespace(activation, ns).map(Into::into)
         }
     }
 }
 
 impl<'gc> Value<'gc> {
-    pub fn as_namespace(&self) -> Result<Ref<Namespace<'gc>>, Error<'gc>> {
+    pub fn as_namespace(&self) -> Result<Namespace<'gc>, Error<'gc>> {
         match self {
             Value::Object(ns) => ns
                 .as_namespace()
@@ -657,21 +656,14 @@ impl<'gc> Value<'gc> {
         match self {
             Value::Object(Object::PrimitiveObject(o)) => o.value_of(activation.context.gc_context),
             Value::Object(o) if hint == Hint::String => {
-                let mut prim = *self;
                 let object = *o;
 
-                if let Value::Object(_) = object.get_public_property("toString", activation)? {
-                    prim = object.call_public_property("toString", &[], activation)?;
-                }
-
+                let prim = object.call_public_property("toString", &[], activation)?;
                 if prim.is_primitive() {
                     return Ok(prim);
                 }
 
-                if let Value::Object(_) = object.get_public_property("valueOf", activation)? {
-                    prim = object.call_public_property("valueOf", &[], activation)?;
-                }
-
+                let prim = object.call_public_property("valueOf", &[], activation)?;
                 if prim.is_primitive() {
                     return Ok(prim);
                 }
@@ -686,21 +678,14 @@ impl<'gc> Value<'gc> {
                 )?))
             }
             Value::Object(o) if hint == Hint::Number => {
-                let mut prim = *self;
                 let object = *o;
 
-                if let Value::Object(_) = object.get_public_property("valueOf", activation)? {
-                    prim = object.call_public_property("valueOf", &[], activation)?;
-                }
-
+                let prim = object.call_public_property("valueOf", &[], activation)?;
                 if prim.is_primitive() {
                     return Ok(prim);
                 }
 
-                if let Value::Object(_) = object.get_public_property("toString", activation)? {
-                    prim = object.call_public_property("toString", &[], activation)?;
-                }
-
+                let prim = object.call_public_property("toString", &[], activation)?;
                 if prim.is_primitive() {
                     return Ok(prim);
                 }
@@ -1139,7 +1124,7 @@ impl<'gc> Value<'gc> {
             // TODO - this should apply to (Array/Vector).indexOf, and possibility more places as well
             if let Some(xml1) = self.as_object().and_then(|obj| obj.as_xml_object()) {
                 if let Some(xml2) = other.as_object().and_then(|obj| obj.as_xml_object()) {
-                    return E4XNode::ptr_eq(*xml1.node(), *xml2.node());
+                    return E4XNode::ptr_eq(xml1.node(), xml2.node());
                 }
             }
             false

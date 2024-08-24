@@ -1,12 +1,12 @@
+import { copyElement, RufflePlayerElement } from "./ruffle-player-element";
 import {
     getPolyfillOptions,
     isFallbackElement,
     isYoutubeFlashSource,
-    RufflePlayer,
     workaroundYoutubeMixedContent,
-} from "./ruffle-player";
-import { registerElement } from "./internal/register-element";
-import { isSwf } from "./swf-utils";
+} from "./inner";
+import { registerElement } from "../register-element";
+import { isSwf } from "../../swf-utils";
 
 /**
  * A polyfill html element.
@@ -16,7 +16,7 @@ import { isSwf } from "./swf-utils";
  *
  * @internal
  */
-export class RuffleEmbed extends RufflePlayer {
+export class RuffleEmbedElement extends RufflePlayerElement {
     /**
      * @ignore
      * @internal
@@ -136,11 +136,76 @@ export class RuffleEmbed extends RufflePlayer {
      * @param elem Element to replace.
      * @returns Created RuffleEmbed.
      */
-    static fromNativeEmbedElement(elem: Element): RuffleEmbed {
-        const externalName = registerElement("ruffle-embed", RuffleEmbed);
-        const ruffleObj = document.createElement(externalName) as RuffleEmbed;
-        ruffleObj.copyElement(elem);
+    static fromNativeEmbedElement(elem: Element): RuffleEmbedElement {
+        const externalName = registerElement(
+            "ruffle-embed",
+            RuffleEmbedElement,
+        );
+        const ruffleObj = document.createElement(
+            externalName,
+        ) as RuffleEmbedElement;
+        copyElement(elem, ruffleObj);
 
         return ruffleObj;
+    }
+
+    /**
+     * Polyfill of height getter
+     *
+     * @ignore
+     * @internal
+     */
+    get height(): string {
+        return this.getAttribute("height") || "";
+    }
+
+    /**
+     * Polyfill of height setter
+     *
+     * @ignore
+     * @internal
+     */
+    set height(height: string) {
+        this.setAttribute("height", height);
+    }
+
+    /**
+     * Polyfill of width getter
+     *
+     * @ignore
+     * @internal
+     */
+    get width(): string {
+        return this.getAttribute("width") || "";
+    }
+
+    /**
+     * Polyfill of width setter
+     *
+     * @ignore
+     * @internal
+     */
+    set width(widthVal: string) {
+        this.setAttribute("width", widthVal);
+    }
+
+    /**
+     * Polyfill of type getter
+     *
+     * @ignore
+     * @internal
+     */
+    get type(): string {
+        return this.getAttribute("type") || "";
+    }
+
+    /**
+     * Polyfill of type setter
+     *
+     * @ignore
+     * @internal
+     */
+    set type(typeVal: string) {
+        this.setAttribute("type", typeVal);
     }
 }

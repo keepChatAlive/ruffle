@@ -1,4 +1,4 @@
-network-settings = Configurações de Rede
+network-settings = Opções de Rede
 player-settings = Opções do Leitor
 movie-parameters = Parâmetros de Filme
 custom-base-url = URL Base Personalizado
@@ -44,10 +44,6 @@ align-top-right = Superior direito
 align-bottom-right = Inferior direito
 align-force = Forçar
 scale-mode = Modo de Escala
-scale-mode-exactfit = Ajuste Exato
-scale-mode-noborder = Sem Borda
-scale-mode-noscale = Sem Escala
-scale-mode-showall = Mostrar Tudo
 scale-mode-force = Forçar
 player-version = Versão do Leitor
 custom-framerate = Taxa de Frames Personalizada

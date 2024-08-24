@@ -130,7 +130,8 @@ pub fn class_init<'gc>(
                 Method::from_builtin(*method, name, gc_context),
                 scope,
                 None,
-                Some(this_class),
+                None,
+                None,
             )
             .into(),
             activation,
@@ -220,14 +221,14 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
 
     class.mark_traits_loaded(activation.context.gc_context);
     class
-        .init_vtable(&mut activation.context)
+        .init_vtable(activation.context)
         .expect("Native class's vtable should initialize");
 
     let c_class = class.c_class().expect("Class::new returns an i_class");
 
     c_class.mark_traits_loaded(activation.context.gc_context);
     c_class
-        .init_vtable(&mut activation.context)
+        .init_vtable(activation.context)
         .expect("Native class's vtable should initialize");
 
     class

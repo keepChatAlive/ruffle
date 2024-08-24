@@ -4,8 +4,10 @@ use crate::gui::{text, DebugMessage};
 use crate::player::LaunchOptions;
 use crate::preferences::GlobalPreferences;
 use egui::{menu, Button, Key, KeyboardShortcut, Modifiers, Widget};
-use ruffle_core::Player;
+use ruffle_core::config::Letterbox;
+use ruffle_core::{Player, StageScaleMode};
 use ruffle_frontend_utils::recents::Recent;
+use ruffle_render::quality::StageQuality;
 use unic_langid::LanguageIdentifier;
 use url::Url;
 use winit::event_loop::EventLoopProxy;
@@ -20,6 +22,13 @@ pub struct MenuBar {
 }
 
 impl MenuBar {
+    const SHORTCUT_FULLSCREEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F11);
+    const SHORTCUT_OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
+    const SHORTCUT_OPEN_ADVANCED: KeyboardShortcut =
+        KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::O);
+    const SHORTCUT_PAUSE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::P);
+    const SHORTCUT_QUIT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
+
     pub fn new(
         event_loop: EventLoopProxy<RuffleEvent>,
         default_launch_options: LaunchOptions,
@@ -34,6 +43,35 @@ impl MenuBar {
         }
     }
 
+    pub fn consume_shortcuts(
+        &mut self,
+        egui_ctx: &egui::Context,
+        dialogs: &mut Dialogs,
+        mut player: Option<&mut Player>,
+    ) {
+        // TODO(mike): Make some MenuItem struct with shortcut info to handle this more cleanly.
+        if egui_ctx.input_mut(|input| input.consume_shortcut(&Self::SHORTCUT_OPEN_ADVANCED)) {
+            dialogs.open_file_advanced();
+        }
+        if egui_ctx.input_mut(|input| input.consume_shortcut(&Self::SHORTCUT_OPEN)) {
+            self.open_file();
+        }
+        if egui_ctx.input_mut(|input| input.consume_shortcut(&Self::SHORTCUT_QUIT)) {
+            self.request_exit();
+        }
+        if egui_ctx.input_mut(|input| input.consume_shortcut(&Self::SHORTCUT_PAUSE)) {
+            if let Some(player) = &mut player {
+                player.set_is_playing(!player.is_playing());
+            }
+        }
+        if egui_ctx.input_mut(|input| input.consume_shortcut(&Self::SHORTCUT_FULLSCREEN)) {
+            if let Some(player) = &mut player {
+                let is_fullscreen = player.is_fullscreen();
+                player.set_fullscreen(!is_fullscreen);
+            }
+        }
+    }
+
     pub fn show(
         &mut self,
         locale: &LanguageIdentifier,
@@ -42,38 +80,14 @@ impl MenuBar {
         mut player: Option<&mut Player>,
     ) {
         egui::TopBottomPanel::top("menu_bar").show(egui_ctx, |ui| {
-            // TODO(mike): Make some MenuItem struct with shortcut info to handle this more cleanly.
-            if ui.ctx().input_mut(|input| {
-                input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::O))
-            }) {
-                dialogs.open_file_advanced();
-            }
-            if ui.ctx().input_mut(|input| {
-                input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::O))
-            }) {
-                self.open_file(ui);
-            }
-            if ui.ctx().input_mut(|input| {
-                input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Q))
-            }) {
-                self.request_exit(ui);
-            }
-            if ui.ctx().input_mut(|input| {
-                input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::P))
-            }) {
-                if let Some(player) = &mut player {
-                    player.set_is_playing(!player.is_playing());
-                }
-            }
-
             menu::bar(ui, |ui| {
                 self.file_menu(locale, ui, dialogs, player.is_some());
+                self.view_menu(locale, ui, &mut player);
 
                 menu::menu_button(ui, text(locale, "controls-menu"), |ui| {
                     ui.add_enabled_ui(player.is_some(), |ui| {
                         let playing = player.as_ref().map(|p| p.is_playing()).unwrap_or_default();
-                        let pause_shortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::P);
-                        if Button::new(text(locale, if playing { "controls-menu-suspend" } else { "controls-menu-resume" })).shortcut_text(ui.ctx().format_shortcut(&pause_shortcut)).ui(ui).clicked() {
+                        if Button::new(text(locale, if playing { "controls-menu-suspend" } else { "controls-menu-resume" })).shortcut_text(ui.ctx().format_shortcut(&Self::SHORTCUT_PAUSE)).ui(ui).clicked() {
                             ui.close_menu();
                             if let Some(player) = &mut player {
                                 player.set_is_playing(!player.is_playing());
@@ -176,20 +190,17 @@ impl MenuBar {
         player_exists: bool,
     ) {
         menu::menu_button(ui, text(locale, "file-menu"), |ui| {
-            let mut shortcut;
-
-            shortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
             if Button::new(text(locale, "file-menu-open-quick"))
-                .shortcut_text(ui.ctx().format_shortcut(&shortcut))
+                .shortcut_text(ui.ctx().format_shortcut(&Self::SHORTCUT_OPEN))
                 .ui(ui)
                 .clicked()
             {
-                self.open_file(ui);
+                ui.close_menu();
+                self.open_file();
             }
 
-            shortcut = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::O);
             if Button::new(text(locale, "file-menu-open-advanced"))
-                .shortcut_text(ui.ctx().format_shortcut(&shortcut))
+                .shortcut_text(ui.ctx().format_shortcut(&Self::SHORTCUT_OPEN_ADVANCED))
                 .ui(ui)
                 .clicked()
             {
@@ -264,20 +275,140 @@ impl MenuBar {
             }
             ui.separator();
 
-            shortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
             if Button::new(text(locale, "file-menu-exit"))
-                .shortcut_text(ui.ctx().format_shortcut(&shortcut))
+                .shortcut_text(ui.ctx().format_shortcut(&Self::SHORTCUT_QUIT))
                 .ui(ui)
                 .clicked()
             {
-                self.request_exit(ui);
+                ui.close_menu();
+                self.request_exit();
             }
         });
     }
 
-    fn open_file(&mut self, ui: &mut egui::Ui) {
-        ui.close_menu();
+    fn view_menu(
+        &mut self,
+        locale: &LanguageIdentifier,
+        ui: &mut egui::Ui,
+        player: &mut Option<&mut Player>,
+    ) {
+        menu::menu_button(ui, text(locale, "view-menu"), |ui| {
+            ui.add_enabled_ui(player.is_some(), |ui| {
+                ui.menu_button(text(locale, "scale-mode"), |ui| {
+                    let items = vec![
+                        (
+                            "scale-mode-noscale",
+                            "scale-mode-noscale-tooltip",
+                            StageScaleMode::NoScale,
+                        ),
+                        (
+                            "scale-mode-showall",
+                            "scale-mode-showall-tooltip",
+                            StageScaleMode::ShowAll,
+                        ),
+                        (
+                            "scale-mode-exactfit",
+                            "scale-mode-exactfit-tooltip",
+                            StageScaleMode::ExactFit,
+                        ),
+                        (
+                            "scale-mode-noborder",
+                            "scale-mode-noborder-tooltip",
+                            StageScaleMode::NoBorder,
+                        ),
+                    ];
+                    let current_scale_mode = player.as_mut().map(|player| player.scale_mode());
+                    for (id, tooltip_id, scale_mode) in items {
+                        let response = if Some(scale_mode) == current_scale_mode {
+                            ui.checkbox(&mut true, text(locale, id))
+                        } else {
+                            ui.button(text(locale, id))
+                        }
+                        .on_hover_text_at_pointer(text(locale, tooltip_id));
+                        if response.clicked() {
+                            ui.close_menu();
+                            if let Some(player) = player {
+                                player.set_scale_mode(scale_mode);
+                            }
+                        }
+                    }
+                    ui.separator();
 
+                    let original_forced_scale_mode = player
+                        .as_mut()
+                        .map(|player| player.forced_scale_mode())
+                        .unwrap_or_default();
+                    let mut forced_scale_mode = original_forced_scale_mode;
+                    ui.checkbox(&mut forced_scale_mode, text(locale, "scale-mode-force"))
+                        .on_hover_text_at_pointer(text(locale, "scale-mode-force-tooltip"));
+                    if forced_scale_mode != original_forced_scale_mode {
+                        if let Some(player) = player {
+                            player.set_forced_scale_mode(forced_scale_mode);
+                        }
+                    }
+                });
+
+                let original_letterbox = if let Some(player) = player {
+                    player.letterbox() == Letterbox::On
+                } else {
+                    false
+                };
+                let mut letterbox = original_letterbox;
+                ui.checkbox(&mut letterbox, text(locale, "letterbox"));
+                if letterbox != original_letterbox {
+                    if let Some(player) = player {
+                        player.set_letterbox(if letterbox {
+                            Letterbox::On
+                        } else {
+                            Letterbox::Off
+                        });
+                    }
+                }
+                ui.separator();
+
+                if Button::new(text(locale, "view-menu-fullscreen"))
+                    .shortcut_text(ui.ctx().format_shortcut(&Self::SHORTCUT_FULLSCREEN))
+                    .ui(ui)
+                    .clicked()
+                {
+                    ui.close_menu();
+                    if let Some(player) = player {
+                        player.set_fullscreen(true);
+                    }
+                }
+                ui.separator();
+
+                ui.menu_button(text(locale, "quality"), |ui| {
+                    let items = vec![
+                        ("quality-low", StageQuality::Low),
+                        ("quality-medium", StageQuality::Medium),
+                        ("quality-high", StageQuality::High),
+                        ("quality-best", StageQuality::Best),
+                        ("quality-high8x8", StageQuality::High8x8),
+                        ("quality-high8x8linear", StageQuality::High8x8Linear),
+                        ("quality-high16x16", StageQuality::High16x16),
+                        ("quality-high16x16linear", StageQuality::High16x16Linear),
+                    ];
+                    let current_quality = player.as_mut().map(|player| player.quality());
+                    for (id, quality) in items {
+                        let clicked = if Some(quality) == current_quality {
+                            ui.checkbox(&mut true, text(locale, id)).clicked()
+                        } else {
+                            ui.button(text(locale, id)).clicked()
+                        };
+                        if clicked {
+                            ui.close_menu();
+                            if let Some(player) = player {
+                                player.set_quality(quality);
+                            }
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    fn open_file(&mut self) {
         let _ = self
             .event_loop
             .send_event(RuffleEvent::BrowseAndOpen(Box::new(
@@ -301,9 +432,8 @@ impl MenuBar {
         ui.close_menu();
     }
 
-    fn request_exit(&mut self, ui: &mut egui::Ui) {
+    fn request_exit(&mut self) {
         let _ = self.event_loop.send_event(RuffleEvent::ExitRequested);
-        ui.close_menu();
     }
 
     fn launch_website(&mut self, ui: &mut egui::Ui, url: &str) {

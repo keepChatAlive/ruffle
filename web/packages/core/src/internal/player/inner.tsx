@@ -1,30 +1,31 @@
-import type { RuffleHandle, ZipWriter } from "../dist/ruffle_web";
-import { createRuffleBuilder } from "./load-ruffle";
-import { ruffleShadowTemplate } from "./internal/ui/shadow-template";
-import { lookupElement } from "./internal/register-element";
-import { DEFAULT_CONFIG } from "./config";
-import type { DataLoadOptions, URLLoadOptions } from "./load-options";
+import type { RuffleHandle, ZipWriter } from "../../../dist/ruffle_web";
 import {
     AutoPlay,
     ContextMenu,
+    DataLoadOptions,
     NetworkingAccessMode,
     UnmuteOverlay,
+    URLLoadOptions,
     WindowMode,
-} from "./load-options";
-import type { MovieMetadata } from "./movie-metadata";
-import { swfFileName } from "./swf-utils";
-import { buildInfo } from "./build-info";
-import { text, textAsParagraphs } from "./internal/i18n";
-import { isExtension } from "./current-script";
-import { configureBuilder } from "./internal/builder";
-import { showPanicScreen } from "./internal/ui/panic";
-import { RUFFLE_ORIGIN } from "./internal/constants";
+} from "../../load-options";
+import type { MovieMetadata } from "../../movie-metadata";
+import { ruffleShadowTemplate } from "../ui/shadow-template";
+import { text, textAsParagraphs } from "../i18n";
+import { swfFileName } from "../../swf-utils";
+import { isExtension } from "../../current-script";
+import { buildInfo } from "../../build-info";
+import { RUFFLE_ORIGIN } from "../constants";
 import {
     InvalidOptionsError,
     InvalidSwfError,
     LoadRuffleWasmError,
     LoadSwfError,
-} from "./internal/errors";
+} from "../errors";
+import { showPanicScreen } from "../ui/panic";
+import { createRuffleBuilder } from "../../load-ruffle";
+import { lookupElement } from "../register-element";
+import { configureBuilder } from "../builder";
+import { DEFAULT_CONFIG } from "../../config";
 
 const DIMENSION_REGEX = /^\s*(\d+(\.\d+)?(%)?)/;
 
@@ -112,11 +113,26 @@ class Point {
 }
 
 /**
- * The ruffle player element that should be inserted onto the page.
- *
- * This element will represent the rendered and intractable flash movie.
+ * This is the backing logic behind a HTML "player" element, and bridges the gap to the Rust codebase.
  */
-export class RufflePlayer extends HTMLElement {
+export class InnerPlayer {
+    /**
+     * Triggered when a movie metadata has been loaded (such as movie width and height).
+     *
+     * @event RufflePlayer#loadedmetadata
+     */
+    static LOADED_METADATA = "loadedmetadata";
+
+    /**
+     * Triggered when a movie is fully loaded.
+     *
+     * @event RufflePlayer#loadeddata
+     */
+    static LOADED_DATA = "loadeddata";
+
+    // The element that contains this player
+    public element: HTMLElement;
+
     private readonly shadow: ShadowRoot;
     private readonly dynamicStyles: HTMLStyleElement;
     private readonly container: HTMLElement;
@@ -149,15 +165,15 @@ export class RufflePlayer extends HTMLElement {
     private _suppressContextMenu = false;
 
     // The effective config loaded upon `.load()`.
-    private loadedConfig?: URLLoadOptions | DataLoadOptions;
+    public loadedConfig?: URLLoadOptions | DataLoadOptions;
 
     private swfUrl?: URL;
     private instance: RuffleHandle | null;
     private newZipWriter: (() => ZipWriter) | null;
     private lastActivePlayingState: boolean;
 
-    private _metadata: MovieMetadata | null;
-    private _readyState: ReadyState;
+    metadata: MovieMetadata | null;
+    _readyState: ReadyState;
 
     private panicked = false;
     private rendererDebugInfo = "";
@@ -167,64 +183,19 @@ export class RufflePlayer extends HTMLElement {
     private pointerMoveMaxDistance = 0;
 
     private volumeSettings: VolumeControls;
+    private readonly debugPlayerInfo: () => string;
+    protected readonly onCallbackAvailable: (name: string) => void;
 
-    /**
-     * Triggered when a movie metadata has been loaded (such as movie width and height).
-     *
-     * @event RufflePlayer#loadedmetadata
-     */
-    static LOADED_METADATA = "loadedmetadata";
+    public constructor(
+        element: HTMLElement,
+        debugPlayerInfo: () => string,
+        onCallbackAvailable: (name: string) => void,
+    ) {
+        this.element = element;
+        this.debugPlayerInfo = debugPlayerInfo;
+        this.onCallbackAvailable = onCallbackAvailable;
 
-    /**
-     * Triggered when a movie is fully loaded.
-     *
-     * @event RufflePlayer#loadeddata
-     */
-    static LOADED_DATA = "loadeddata";
-
-    /**
-     * A movie can communicate with the hosting page using fscommand
-     * as long as script access is allowed.
-     *
-     * @param command A string passed to the host application for any use.
-     * @param args A string passed to the host application for any use.
-     * @returns True if the command was handled.
-     */
-    onFSCommand: ((command: string, args: string) => boolean) | null;
-
-    /**
-     * Any configuration that should apply to this specific player.
-     * This will be defaulted with any global configuration.
-     */
-    config: URLLoadOptions | DataLoadOptions | object = {};
-
-    /**
-     * Indicates the readiness of the playing movie.
-     *
-     * @returns The `ReadyState` of the player.
-     */
-    get readyState(): ReadyState {
-        return this._readyState;
-    }
-
-    /**
-     * The metadata of the playing movie (such as movie width and height).
-     * These are inherent properties stored in the SWF file and are not affected by runtime changes.
-     * For example, `metadata.width` is the width of the SWF file, and not the width of the Ruffle player.
-     *
-     * @returns The metadata of the movie, or `null` if the movie metadata has not yet loaded.
-     */
-    get metadata(): MovieMetadata | null {
-        return this._metadata;
-    }
-
-    /**
-     * Constructs a new Ruffle flash player for insertion onto the page.
-     */
-    constructor() {
-        super();
-
-        this.shadow = this.attachShadow({ mode: "open" });
+        this.shadow = this.element.attachShadow({ mode: "open" });
         this.shadow.appendChild(ruffleShadowTemplate.content.cloneNode(true));
 
         this.dynamicStyles = this.shadow.getElementById(
@@ -289,11 +260,21 @@ export class RufflePlayer extends HTMLElement {
             "context-menu-overlay",
         )!;
         this.contextMenuElement = this.shadow.getElementById("context-menu")!;
+        const preserveMenu = (event: MouseEvent) => {
+            event.preventDefault();
+            event.stopPropagation();
+        };
+        this.contextMenuElement.addEventListener("contextmenu", preserveMenu);
+        this.contextMenuElement.addEventListener("click", preserveMenu);
+
         document.documentElement.addEventListener(
             "pointerdown",
             this.checkIfTouch.bind(this),
         );
-        this.addEventListener("contextmenu", this.showContextMenu.bind(this));
+        this.element.addEventListener(
+            "contextmenu",
+            this.showContextMenu.bind(this),
+        );
         this.container.addEventListener(
             "pointerdown",
             this.pointerDown.bind(this),
@@ -311,11 +292,11 @@ export class RufflePlayer extends HTMLElement {
             this.clearLongPressTimer.bind(this),
         );
 
-        this.addEventListener(
+        this.element.addEventListener(
             "fullscreenchange",
             this.fullScreenChange.bind(this),
         );
-        this.addEventListener(
+        this.element.addEventListener(
             "webkitfullscreenchange",
             this.fullScreenChange.bind(this),
         );
@@ -325,11 +306,27 @@ export class RufflePlayer extends HTMLElement {
         this.onFSCommand = null;
 
         this._readyState = ReadyState.HaveNothing;
-        this._metadata = null;
+        this.metadata = null;
 
         this.lastActivePlayingState = false;
         this.setupPauseOnTabHidden();
     }
+
+    /**
+     * A movie can communicate with the hosting page using fscommand
+     * as long as script access is allowed.
+     *
+     * @param command A string passed to the host application for any use.
+     * @param args A string passed to the host application for any use.
+     * @returns True if the command was handled.
+     */
+    onFSCommand: ((command: string, args: string) => boolean) | null;
+
+    /**
+     * Any configuration that should apply to this specific player.
+     * This will be defaulted with any global configuration.
+     */
+    config: URLLoadOptions | DataLoadOptions | object = {};
 
     /**
      * Add functions to open and close a modal.
@@ -460,108 +457,10 @@ export class RufflePlayer extends HTMLElement {
     }
 
     /**
-     * Polyfill of height getter for HTMLEmbedElement and HTMLObjectElement
-     *
-     * @ignore
-     * @internal
-     */
-    get height(): string {
-        return this.getAttribute("height") || "";
-    }
-
-    /**
-     * Polyfill of height setter for HTMLEmbedElement and HTMLObjectElement
-     *
-     * @ignore
-     * @internal
-     */
-    set height(height: string) {
-        this.setAttribute("height", height);
-    }
-
-    /**
-     * Polyfill of width getter for HTMLEmbedElement and HTMLObjectElement
-     *
-     * @ignore
-     * @internal
-     */
-    get width(): string {
-        return this.getAttribute("width") || "";
-    }
-
-    /**
-     * Polyfill of width setter for HTMLEmbedElement and HTMLObjectElement
-     *
-     * @ignore
-     * @internal
-     */
-    set width(widthVal: string) {
-        this.setAttribute("width", widthVal);
-    }
-
-    /**
-     * Polyfill of type getter for HTMLEmbedElement and HTMLObjectElement
-     *
-     * @ignore
-     * @internal
-     */
-    get type(): string {
-        return this.getAttribute("type") || "";
-    }
-
-    /**
-     * Polyfill of type setter for HTMLEmbedElement and HTMLObjectElement
-     *
-     * @ignore
-     * @internal
-     */
-    set type(typeVal: string) {
-        this.setAttribute("type", typeVal);
-    }
-
-    /**
-     * @ignore
-     * @internal
-     */
-    connectedCallback(): void {
-        this.updateStyles();
-    }
-
-    /**
-     * @ignore
-     * @internal
-     */
-    static get observedAttributes(): string[] {
-        return ["width", "height"];
-    }
-
-    /**
-     * @ignore
-     * @internal
-     */
-    attributeChangedCallback(
-        name: string,
-        _oldValue: string | undefined,
-        _newValue: string | undefined,
-    ): void {
-        if (name === "width" || name === "height") {
-            this.updateStyles();
-        }
-    }
-
-    /**
-     * @ignore
-     * @internal
-     */
-    disconnectedCallback(): void {
-        this.destroy();
-    }
-
-    /**
      * Updates the internal shadow DOM to reflect any set attributes from
      * this element.
      */
-    protected updateStyles(): void {
+    updateStyles(): void {
         if (this.dynamicStyles.sheet) {
             if (this.dynamicStyles.sheet.cssRules) {
                 for (
@@ -573,9 +472,9 @@ export class RufflePlayer extends HTMLElement {
                 }
             }
 
-            const widthAttr = this.attributes.getNamedItem("width");
+            const widthAttr = this.element.attributes.getNamedItem("width");
             if (widthAttr !== undefined && widthAttr !== null) {
-                const width = RufflePlayer.htmlDimensionToCssDimension(
+                const width = InnerPlayer.htmlDimensionToCssDimension(
                     widthAttr.value,
                 );
                 if (width !== null) {
@@ -585,9 +484,9 @@ export class RufflePlayer extends HTMLElement {
                 }
             }
 
-            const heightAttr = this.attributes.getNamedItem("height");
+            const heightAttr = this.element.attributes.getNamedItem("height");
             if (heightAttr !== undefined && heightAttr !== null) {
-                const height = RufflePlayer.htmlDimensionToCssDimension(
+                const height = InnerPlayer.htmlDimensionToCssDimension(
                     heightAttr.value,
                 );
                 if (height !== null) {
@@ -612,7 +511,7 @@ export class RufflePlayer extends HTMLElement {
         const element = lookupElement("ruffle-object");
 
         if (element !== null) {
-            let parent = this.parentNode;
+            let parent = this.element.parentNode;
             while (parent !== document && parent !== null) {
                 if (parent.nodeName === element.name) {
                     return true;
@@ -822,11 +721,11 @@ export class RufflePlayer extends HTMLElement {
     /**
      * Destroys the currently running instance of Ruffle.
      */
-    private destroy(): void {
+    destroy(): void {
         if (this.instance) {
             this.instance.destroy();
             this.instance = null;
-            this._metadata = null;
+            this.metadata = null;
             this._readyState = ReadyState.HaveNothing;
             console.log("Ruffle instance destroyed.");
         }
@@ -901,14 +800,14 @@ export class RufflePlayer extends HTMLElement {
     ): Promise<void> {
         options = this.checkOptions(options);
 
-        if (!this.isConnected || this.isUnusedFallbackObject()) {
+        if (!this.element.isConnected || this.isUnusedFallbackObject()) {
             console.warn(
                 "Ignoring attempt to play a disconnected or suspended Ruffle element",
             );
             return;
         }
 
-        if (isFallbackElement(this)) {
+        if (isFallbackElement(this.element)) {
             // Silently fail on attempt to play a Ruffle element inside a specific node.
             return;
         }
@@ -1034,7 +933,7 @@ export class RufflePlayer extends HTMLElement {
     get isFullscreen(): boolean {
         return (
             (document.fullscreenElement || document.webkitFullscreenElement) ===
-            this
+            this.element
         );
     }
 
@@ -1063,12 +962,12 @@ export class RufflePlayer extends HTMLElement {
         const options: FullscreenOptions = {
             navigationUI: "hide",
         };
-        if (this.requestFullscreen) {
-            this.requestFullscreen(options);
-        } else if (this.webkitRequestFullscreen) {
-            this.webkitRequestFullscreen(options);
-        } else if (this.webkitRequestFullScreen) {
-            this.webkitRequestFullScreen(options);
+        if (this.element.requestFullscreen) {
+            this.element.requestFullscreen(options);
+        } else if (this.element.webkitRequestFullscreen) {
+            this.element.webkitRequestFullscreen(options);
+        } else if (this.element.webkitRequestFullScreen) {
+            this.element.webkitRequestFullScreen(options);
         }
     }
 
@@ -1388,7 +1287,7 @@ export class RufflePlayer extends HTMLElement {
         const string = input.value;
         for (const char of string) {
             for (const eventType of ["keydown", "keyup"]) {
-                this.dispatchEvent(
+                this.element.dispatchEvent(
                     new KeyboardEvent(eventType, {
                         key: char,
                         bubbles: true,
@@ -1413,10 +1312,10 @@ export class RufflePlayer extends HTMLElement {
         //  2. if it doesn't, the action shouldn't be a result of user
         //     interaction and focusing synchronously wouldn't work anyway.
         if (this.instance?.has_focus()) {
-            this.virtualKeyboard.focus({preventScroll: true});
+            this.virtualKeyboard.focus({ preventScroll: true });
         } else {
             setTimeout(() => {
-                this.virtualKeyboard.focus({preventScroll: true});
+                this.virtualKeyboard.focus({ preventScroll: true });
             }, 0);
         }
     }
@@ -1680,27 +1579,33 @@ export class RufflePlayer extends HTMLElement {
                 this.contextMenuElement.appendChild(menuItem);
 
                 if (enabled !== false) {
-                    menuItem.addEventListener(
-                        this.contextMenuSupported ? "click" : "pointerup",
-                        async (event: MouseEvent) => {
-                            // Prevent the menu from being destroyed.
-                            // It's required when we're dealing with async callbacks,
-                            // as the async callback may still use the menu in the future.
-                            event.stopPropagation();
+                    const itemAction = async (event: MouseEvent) => {
+                        // Prevent right-clicks from displaying the browser context menu.
+                        event.preventDefault();
 
-                            await onClick(event);
+                        // Prevent the menu from being destroyed.
+                        // It's required when we're dealing with async callbacks,
+                        // as the async callback may still use the menu in the future.
+                        event.stopPropagation();
 
-                            // Then we have to close the context menu manually after the callback finishes.
-                            this.hideContextMenu();
-                        },
-                    );
+                        await onClick(event);
+
+                        // Then we have to close the context menu manually after the callback finishes.
+                        this.hideContextMenu();
+                    }
+                    if (this.contextMenuSupported) {
+                        menuItem.addEventListener("click", itemAction);
+                        menuItem.addEventListener("contextmenu", itemAction);
+                    } else {
+                        menuItem.addEventListener("pointerup", itemAction);
+                    }
                 }
             }
         }
 
         this.contextMenuOverlay.classList.remove("hidden");
 
-        const playerRect = this.getBoundingClientRect();
+        const playerRect = this.element.getBoundingClientRect();
         const contextMenuRect = this.contextMenuElement.getBoundingClientRect();
 
         // Keep the entire context menu inside the viewport.
@@ -1823,41 +1728,6 @@ export class RufflePlayer extends HTMLElement {
     }
 
     /**
-     * Copies attributes and children from another element to this player element.
-     * Used by the polyfill elements, RuffleObject and RuffleEmbed.
-     *
-     * @param element The element to copy all attributes from.
-     */
-    protected copyElement(element: Element): void {
-        if (element) {
-            for (const attribute of element.attributes) {
-                if (attribute.specified) {
-                    // Issue 468: Chrome "Click to Active Flash" box stomps on title attribute
-                    if (
-                        attribute.name === "title" &&
-                        attribute.value === "Adobe Flash Player"
-                    ) {
-                        continue;
-                    }
-
-                    try {
-                        this.setAttribute(attribute.name, attribute.value);
-                    } catch (err) {
-                        // The embed may have invalid attributes, so handle these gracefully.
-                        console.warn(
-                            `Unable to set attribute ${attribute.name} on Ruffle instance`,
-                        );
-                    }
-                }
-            }
-
-            for (const node of Array.from(element.children)) {
-                this.appendChild(node);
-            }
-        }
-    }
-
-    /**
      * Converts a dimension attribute on an HTML embed/object element to a valid CSS dimension.
      * HTML element dimensions are unitless, but can also be percentages.
      * Add a 'px' unit unless the value is a percentage.
@@ -1884,27 +1754,12 @@ export class RufflePlayer extends HTMLElement {
         return null;
     }
 
-    /**
-     * When a movie presents a new callback through `ExternalInterface.addCallback`,
-     * we are informed so that we can expose the method on any relevant DOM element.
-     *
-     * This should only be called by Ruffle itself and not by users.
-     *
-     * @param name The name of the callback that is now available.
-     *
-     * @internal
-     * @ignore
-     */
-    protected onCallbackAvailable(name: string): void {
-        const instance = this.instance;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (this as any)[name] = (...args: unknown[]) => {
-            return instance?.call_exposed_callback(name, args);
-        };
+    public callExternalInterface(name: string, args: any[]) {
+        return this.instance?.call_exposed_callback(name, args);
     }
 
     protected getObjectId(): string | null {
-        return this.getAttribute("name");
+        return this.element.getAttribute("name");
     }
 
     /**
@@ -2152,10 +2007,6 @@ export class RufflePlayer extends HTMLElement {
         }
     }
 
-    protected debugPlayerInfo(): string {
-        return "";
-    }
-
     private hideSplashScreen(): void {
         this.splashScreen.classList.add("hidden");
         this.container.classList.remove("hidden");
@@ -2167,23 +2018,15 @@ export class RufflePlayer extends HTMLElement {
     }
 
     protected setMetadata(metadata: MovieMetadata) {
-        this._metadata = metadata;
+        this.metadata = metadata;
         // TODO: Switch this to ReadyState.Loading when we have streaming support.
         this._readyState = ReadyState.Loaded;
         this.hideSplashScreen();
-        this.dispatchEvent(new CustomEvent(RufflePlayer.LOADED_METADATA));
+        this.element.dispatchEvent(
+            new CustomEvent(InnerPlayer.LOADED_METADATA),
+        );
         // TODO: Move this to whatever function changes the ReadyState to Loaded when we have streaming support.
-        this.dispatchEvent(new CustomEvent(RufflePlayer.LOADED_DATA));
-    }
-
-    /** @ignore */
-    public PercentLoaded(): number {
-        // [NA] This is a stub - we need to research how this is actually implemented (is it just base swf loadedBytes?)
-        if (this._readyState === ReadyState.Loaded) {
-            return 100;
-        } else {
-            return 0;
-        }
+        this.element.dispatchEvent(new CustomEvent(InnerPlayer.LOADED_DATA));
     }
 }
 
@@ -2208,52 +2051,25 @@ export enum ReadyState {
 }
 
 /**
- * Parses a given string or null value to a boolean or null and returns it.
- *
- * @param value The string or null value that should be parsed to a boolean or null.
- * @returns The string as a boolean, if it exists and contains a boolean, otherwise null.
+ * The volume controls of the Ruffle web GUI.
  */
-function parseBoolean(value: string | null): boolean | null {
-    switch (value?.toLowerCase()) {
-        case "true":
-            return true;
-        case "false":
-            return false;
-        default:
-            return null;
-    }
-}
+class VolumeControls {
+    isMuted: boolean;
+    volume: number;
 
-/**
- * Parses a string with script access options or null and returns whether the script
- * access options allow the SWF file with the given URL to call JavaScript code in
- * the surrounding HTML file if they exist correctly, otherwise null.
- *
- * @param access The string with the script access options or null.
- * @param url The URL of the SWF file.
- * @returns Whether the script access options allow the SWF file with the given URL to
- * call JavaScript code in the surrounding HTML file if they exist correctly, otherwise null.
- */
-function parseAllowScriptAccess(
-    access: string | null,
-    url: string,
-): boolean | null {
-    switch (access?.toLowerCase()) {
-        case "always":
-            return true;
-        case "never":
-            return false;
-        case "samedomain":
-            try {
-                return (
-                    new URL(window.location.href).origin ===
-                    new URL(url, window.location.href).origin
-                );
-            } catch {
-                return false;
-            }
-        default:
-            return null;
+    constructor(isMuted: boolean, volume: number) {
+        this.isMuted = isMuted;
+        this.volume = volume;
+    }
+
+    /**
+     * Returns the volume between 0 and 1 (calculated out of the
+     * checkbox and the slider).
+     *
+     * @returns The volume between 0 and 1.
+     */
+    public get_volume(): number {
+        return !this.isMuted ? this.volume / 100 : 0;
     }
 }
 
@@ -2421,24 +2237,51 @@ export function isFallbackElement(elem: Element): boolean {
 }
 
 /**
- * The volume controls of the Ruffle web GUI.
+ * Parses a given string or null value to a boolean or null and returns it.
+ *
+ * @param value The string or null value that should be parsed to a boolean or null.
+ * @returns The string as a boolean, if it exists and contains a boolean, otherwise null.
  */
-class VolumeControls {
-    isMuted: boolean;
-    volume: number;
-
-    constructor(isMuted: boolean, volume: number) {
-        this.isMuted = isMuted;
-        this.volume = volume;
+function parseBoolean(value: string | null): boolean | null {
+    switch (value?.toLowerCase()) {
+        case "true":
+            return true;
+        case "false":
+            return false;
+        default:
+            return null;
     }
+}
 
-    /**
-     * Returns the volume between 0 and 1 (calculated out of the
-     * checkbox and the slider).
-     *
-     * @returns The volume between 0 and 1.
-     */
-    public get_volume(): number {
-        return !this.isMuted ? this.volume / 100 : 0;
+/**
+ * Parses a string with script access options or null and returns whether the script
+ * access options allow the SWF file with the given URL to call JavaScript code in
+ * the surrounding HTML file if they exist correctly, otherwise null.
+ *
+ * @param access The string with the script access options or null.
+ * @param url The URL of the SWF file.
+ * @returns Whether the script access options allow the SWF file with the given URL to
+ * call JavaScript code in the surrounding HTML file if they exist correctly, otherwise null.
+ */
+function parseAllowScriptAccess(
+    access: string | null,
+    url: string,
+): boolean | null {
+    switch (access?.toLowerCase()) {
+        case "always":
+            return true;
+        case "never":
+            return false;
+        case "samedomain":
+            try {
+                return (
+                    new URL(window.location.href).origin ===
+                    new URL(url, window.location.href).origin
+                );
+            } catch {
+                return false;
+            }
+        default:
+            return null;
     }
 }

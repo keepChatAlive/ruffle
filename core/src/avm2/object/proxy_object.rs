@@ -8,8 +8,7 @@ use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::avm2::Multiname;
 use core::fmt;
-use gc_arena::{Collect, GcCell, GcWeakCell, Mutation};
-use std::cell::{Ref, RefMut};
+use gc_arena::{Collect, Gc, GcWeak, Mutation};
 
 /// A class instance allocator that allocates Proxy objects.
 pub fn proxy_allocator<'gc>(
@@ -18,7 +17,7 @@ pub fn proxy_allocator<'gc>(
 ) -> Result<Object<'gc>, Error<'gc>> {
     let base = ScriptObjectData::new(class);
 
-    Ok(ProxyObject(GcCell::new(
+    Ok(ProxyObject(Gc::new(
         activation.context.gc_context,
         ProxyObjectData { base },
     ))
@@ -27,38 +26,43 @@ pub fn proxy_allocator<'gc>(
 
 #[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
-pub struct ProxyObject<'gc>(pub GcCell<'gc, ProxyObjectData<'gc>>);
+pub struct ProxyObject<'gc>(pub Gc<'gc, ProxyObjectData<'gc>>);
 
 #[derive(Clone, Collect, Copy, Debug)]
 #[collect(no_drop)]
-pub struct ProxyObjectWeak<'gc>(pub GcWeakCell<'gc, ProxyObjectData<'gc>>);
+pub struct ProxyObjectWeak<'gc>(pub GcWeak<'gc, ProxyObjectData<'gc>>);
 
 impl fmt::Debug for ProxyObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ProxyObject")
-            .field("ptr", &self.0.as_ptr())
+            .field("ptr", &Gc::as_ptr(self.0))
             .finish()
     }
 }
 
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
+#[repr(C, align(8))]
 pub struct ProxyObjectData<'gc> {
     /// Base script object
     base: ScriptObjectData<'gc>,
 }
 
-impl<'gc> TObject<'gc> for ProxyObject<'gc> {
-    fn base(&self) -> Ref<ScriptObjectData<'gc>> {
-        Ref::map(self.0.read(), |read| &read.base)
-    }
+const _: () = assert!(std::mem::offset_of!(ProxyObjectData, base) == 0);
+const _: () =
+    assert!(std::mem::align_of::<ProxyObjectData>() == std::mem::align_of::<ScriptObjectData>());
 
-    fn base_mut(&self, mc: &Mutation<'gc>) -> RefMut<ScriptObjectData<'gc>> {
-        RefMut::map(self.0.write(mc), |write| &mut write.base)
+impl<'gc> TObject<'gc> for ProxyObject<'gc> {
+    fn gc_base(&self) -> Gc<'gc, ScriptObjectData<'gc>> {
+        // SAFETY: Object data is repr(C), and a compile-time assert ensures
+        // that the ScriptObjectData stays at offset 0 of the struct- so the
+        // layouts are compatible
+
+        unsafe { Gc::cast(self.0) }
     }
 
     fn as_ptr(&self) -> *const ObjectPtr {
-        self.0.as_ptr() as *const ObjectPtr
+        Gc::as_ptr(self.0) as *const ObjectPtr
     }
 
     fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {

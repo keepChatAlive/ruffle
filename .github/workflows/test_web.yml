@@ -60,9 +60,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       # wasm-bindgen-cli version must match wasm-bindgen crate version.
-      # Be sure to update in release_nightly.yml, web/Cargo.toml and web/README.md.
+      # Be sure to update in release_nightly.yml, Cargo.toml, web/docker/Dockerfile,
+      # and web/README.md as well.
       - name: Install wasm-bindgen
-        run: cargo install wasm-bindgen-cli --version 0.2.92
+        run: cargo install wasm-bindgen-cli --version 0.2.93
 
       # Keep the version number in sync in all workflows,
       # and in the extension builder Dockerfile!
@@ -96,7 +97,7 @@ jobs:
         # Don't run browser tests on Windows because it's flaky for unknown reasons. :-(
         if: runner.os == 'Linux'
         working-directory: web
-        run: npm run wdio -- --headless --chrome --firefox
+        run: npm run wdio -- --headless --chrome --firefox --edge
 
   check-required:
     needs: changes

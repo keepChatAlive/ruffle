@@ -24,14 +24,14 @@ fn class_call<'gc>(
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let this_class = activation.subclass_object().unwrap();
+    let object_class = activation.avm2().classes().object;
 
     if args.is_empty() {
-        return this_class.construct(activation, args).map(|o| o.into());
+        return object_class.construct(activation, args).map(|o| o.into());
     }
     let arg = args.get(0).cloned().unwrap();
     if matches!(arg, Value::Undefined) || matches!(arg, Value::Null) {
-        return this_class.construct(activation, args).map(|o| o.into());
+        return object_class.construct(activation, args).map(|o| o.into());
     }
     Ok(arg)
 }
@@ -54,7 +54,8 @@ pub fn class_init<'gc>(
             Method::from_builtin(has_own_property, "hasOwnProperty", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -66,7 +67,8 @@ pub fn class_init<'gc>(
             Method::from_builtin(property_is_enumerable, "propertyIsEnumerable", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -82,7 +84,8 @@ pub fn class_init<'gc>(
             ),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -94,7 +97,8 @@ pub fn class_init<'gc>(
             Method::from_builtin(is_prototype_of, "isPrototypeOf", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -106,7 +110,8 @@ pub fn class_init<'gc>(
             Method::from_builtin(to_string, "toString", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -118,7 +123,8 @@ pub fn class_init<'gc>(
             Method::from_builtin(to_locale_string, "toLocaleString", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -130,7 +136,8 @@ pub fn class_init<'gc>(
             Method::from_builtin(value_of, "valueOf", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -306,7 +313,7 @@ pub fn create_i_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
 
     object_i_class.mark_traits_loaded(activation.context.gc_context);
     object_i_class
-        .init_vtable(&mut activation.context)
+        .init_vtable(activation.context)
         .expect("Native class's vtable should initialize");
 
     object_i_class
@@ -344,7 +351,7 @@ pub fn create_c_class<'gc>(
 
     object_c_class.mark_traits_loaded(activation.context.gc_context);
     object_c_class
-        .init_vtable(&mut activation.context)
+        .init_vtable(activation.context)
         .expect("Native class's vtable should initialize");
 
     object_c_class

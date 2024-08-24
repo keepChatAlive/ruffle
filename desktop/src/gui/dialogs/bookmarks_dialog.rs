@@ -4,6 +4,7 @@ use crate::preferences::GlobalPreferences;
 use egui::{Align2, Button, Grid, Label, Layout, Sense, Ui, Widget, Window};
 use egui_extras::{Column, TableBuilder};
 use ruffle_frontend_utils::bookmarks::Bookmark;
+use std::sync::Weak;
 use unic_langid::LanguageIdentifier;
 use url::Url;
 
@@ -14,7 +15,11 @@ pub struct BookmarkAddDialog {
 }
 
 impl BookmarkAddDialog {
-    pub fn new(preferences: GlobalPreferences, initial_url: Option<Url>) -> Self {
+    pub fn new(
+        preferences: GlobalPreferences,
+        initial_url: Option<Url>,
+        window: Weak<winit::window::Window>,
+    ) -> Self {
         Self {
             preferences,
             name: initial_url
@@ -22,12 +27,12 @@ impl BookmarkAddDialog {
                 .map(|x| ruffle_frontend_utils::url_to_readable_name(x).into_owned())
                 .unwrap_or_default(),
             // TODO: hint.
-            url: PathOrUrlField::new(initial_url, ""),
+            url: PathOrUrlField::new(initial_url, "", window),
         }
     }
 
     fn is_valid(&self) -> bool {
-        self.url.value().is_some() && !self.name.is_empty()
+        self.url.result().is_some() && !self.name.is_empty()
     }
 
     pub fn show(&mut self, locale: &LanguageIdentifier, egui_ctx: &egui::Context) -> bool {
@@ -66,7 +71,7 @@ impl BookmarkAddDialog {
                                     name: self.name.clone(),
                                     url: self
                                         .url
-                                        .value()
+                                        .result()
                                         .cloned()
                                         .expect("is_valid() ensured value exists"),
                                 })
@@ -93,13 +98,15 @@ struct SelectedBookmark {
 }
 
 pub struct BookmarksDialog {
+    window: Weak<winit::window::Window>,
     preferences: GlobalPreferences,
     selected_bookmark: Option<SelectedBookmark>,
 }
 
 impl BookmarksDialog {
-    pub fn new(preferences: GlobalPreferences) -> Self {
+    pub fn new(preferences: GlobalPreferences, window: Weak<winit::window::Window>) -> Self {
         Self {
+            window,
             preferences,
             selected_bookmark: None,
         }
@@ -201,7 +208,11 @@ impl BookmarksDialog {
                                     index,
                                     // TODO: set hint
                                     name: bookmark.name.clone(),
-                                    url: PathOrUrlField::new(Some(bookmark.url.clone()), ""),
+                                    url: PathOrUrlField::new(
+                                        Some(bookmark.url.clone()),
+                                        "",
+                                        self.window.clone(),
+                                    ),
                                 });
                             }
                         });
@@ -237,12 +248,12 @@ impl BookmarksDialog {
                     }
                     ui.end_row();
 
-                    let previous_url = bookmark.url.value().cloned();
+                    let previous_url = bookmark.url.result().cloned();
 
                     ui.label(text(locale, "bookmarks-dialog-location"));
-                    let current_url = bookmark.url.ui(locale, ui).value();
+                    let current_url = bookmark.url.ui(locale, ui).result();
 
-                    // TOOD: Change the UrlOrPathField widget to return a response instead, so we can update when we lose the focus, removes the need to clone every redraw.
+                    // TODO: Change the UrlOrPathField widget to return a response instead, so we can update when we lose the focus, removes the need to clone every redraw.
                     if previous_url.as_ref() != current_url {
                         if let Some(url) = current_url {
                             if let Err(e) = self.preferences.write_bookmarks(|writer| {

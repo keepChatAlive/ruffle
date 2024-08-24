@@ -1,14 +1,14 @@
+import { copyElement, RufflePlayerElement } from "./ruffle-player-element";
 import {
+    getPolyfillOptions,
     isFallbackElement,
     isYoutubeFlashSource,
     workaroundYoutubeMixedContent,
-    RufflePlayer,
-    getPolyfillOptions,
-} from "./ruffle-player";
-import { FLASH_ACTIVEX_CLASSID } from "./flash-identifiers";
-import { registerElement } from "./internal/register-element";
-import { RuffleEmbed } from "./ruffle-embed";
-import { isSwf } from "./swf-utils";
+} from "./inner";
+import { FLASH_ACTIVEX_CLASSID } from "../../flash-identifiers";
+import { registerElement } from "../register-element";
+import { RuffleEmbedElement } from "./ruffle-embed-element";
+import { isSwf } from "../../swf-utils";
 
 /**
  * Find and return the first value in obj with the given key.
@@ -63,7 +63,7 @@ function paramsOf(elem: Element): Record<string, string> {
  *
  * @internal
  */
-export class RuffleObject extends RufflePlayer {
+export class RuffleObjectElement extends RufflePlayerElement {
     private params: Record<string, string> = {};
 
     /**
@@ -232,10 +232,10 @@ export class RuffleObject extends RufflePlayer {
             // another <object> that would be supported on modern browsers.
             return (
                 !Array.from(elem.getElementsByTagName("object")).some(
-                    RuffleObject.isInterdictable,
+                    RuffleObjectElement.isInterdictable,
                 ) &&
                 !Array.from(elem.getElementsByTagName("embed")).some(
-                    RuffleEmbed.isInterdictable,
+                    RuffleEmbedElement.isInterdictable,
                 )
             );
         } else if (classid) {
@@ -252,17 +252,20 @@ export class RuffleObject extends RufflePlayer {
      * @param elem Element to replace.
      * @returns Created RuffleObject.
      */
-    static fromNativeObjectElement(elem: Element): RuffleObject {
-        const externalName = registerElement("ruffle-object", RuffleObject);
-        const ruffleObj: RuffleObject = document.createElement(
+    static fromNativeObjectElement(elem: Element): RuffleObjectElement {
+        const externalName = registerElement(
+            "ruffle-object",
+            RuffleObjectElement,
+        );
+        const ruffleObj: RuffleObjectElement = document.createElement(
             externalName,
-        ) as RuffleObject;
+        ) as RuffleObjectElement;
 
         // Avoid copying embeds-inside-objects to avoid double polyfilling.
         for (const embedElem of Array.from(
             elem.getElementsByTagName("embed"),
         )) {
-            if (RuffleEmbed.isInterdictable(embedElem)) {
+            if (RuffleEmbedElement.isInterdictable(embedElem)) {
                 embedElem.remove();
             }
         }
@@ -272,13 +275,73 @@ export class RuffleObject extends RufflePlayer {
         for (const objectElem of Array.from(
             elem.getElementsByTagName("object"),
         )) {
-            if (RuffleObject.isInterdictable(objectElem)) {
+            if (RuffleObjectElement.isInterdictable(objectElem)) {
                 objectElem.remove();
             }
         }
 
-        ruffleObj.copyElement(elem);
+        copyElement(elem, ruffleObj);
 
         return ruffleObj;
+    }
+
+    /**
+     * Polyfill of height getter
+     *
+     * @ignore
+     * @internal
+     */
+    get height(): string {
+        return this.getAttribute("height") || "";
+    }
+
+    /**
+     * Polyfill of height setter
+     *
+     * @ignore
+     * @internal
+     */
+    set height(height: string) {
+        this.setAttribute("height", height);
+    }
+
+    /**
+     * Polyfill of width getter
+     *
+     * @ignore
+     * @internal
+     */
+    get width(): string {
+        return this.getAttribute("width") || "";
+    }
+
+    /**
+     * Polyfill of width setter
+     *
+     * @ignore
+     * @internal
+     */
+    set width(widthVal: string) {
+        this.setAttribute("width", widthVal);
+    }
+
+    /**
+     * Polyfill of type getter
+     *
+     * @ignore
+     * @internal
+     */
+    get type(): string {
+        return this.getAttribute("type") || "";
+    }
+
+    /**
+     * Polyfill of type setter
+     *
+     * @ignore
+     * @internal
+     */
+    set type(typeVal: string) {
+        this.setAttribute("type", typeVal);
     }
 }
