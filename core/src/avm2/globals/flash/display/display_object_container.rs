@@ -16,7 +16,7 @@ use crate::display_object::{DisplayObject, TDisplayObject, TDisplayObjectContain
 use std::cmp::min;
 
 /// Implements `flash.display.DisplayObjectContainer`'s native instance constructor.
-pub fn native_instance_init<'gc>(
+pub fn super_init<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
@@ -178,7 +178,6 @@ pub fn get_child_by_name<'gc>(
         if let Some(child) = dobj.child_by_name(&name, false) {
             return Ok(child.object2());
         } else {
-            tracing::warn!("Display object container has no child with name {}", name);
             return Ok(Value::Null);
         }
     }

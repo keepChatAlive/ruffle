@@ -1,5 +1,5 @@
 import { expect } from "chai";
-import { Player, PublicAPI } from "ruffle-core";
+import { Player, Setup } from "ruffle-core";
 
 declare global {
     interface Window {
@@ -7,8 +7,8 @@ declare global {
     }
 }
 
-declare module "ruffle-core" {
-    interface Player {
+declare module "ruffle-core/dist/public/player" {
+    interface PlayerElement {
         __ruffle_log__: string;
     }
 }
@@ -31,7 +31,7 @@ export async function isRufflePlayerLoaded(
             (player) =>
                 // https://github.com/webdriverio/webdriverio/issues/6486
                 // TODO: How can we import ReadyState enum?
-                (player as unknown as Player).readyState,
+                (player as unknown as Player.PlayerElement).readyState,
             player,
         )) === 2
     );
@@ -103,7 +103,7 @@ export async function setupAndPlay(
 ) {
     await browser.execute((playerElement) => {
         // https://github.com/webdriverio/webdriverio/issues/6486
-        const player = playerElement as unknown as Player;
+        const player = playerElement as unknown as Player.PlayerElement;
         player.__ruffle_log__ = "";
         player.traceObserver = (msg) => {
             player.__ruffle_log__ += msg + "\n";
@@ -122,7 +122,8 @@ export async function getTraceOutput(
             return (
                 (await browser.execute((player) => {
                     // https://github.com/webdriverio/webdriverio/issues/6486
-                    return (player as unknown as Player).__ruffle_log__;
+                    return (player as unknown as Player.PlayerElement)
+                        .__ruffle_log__;
                 }, player)) !== ""
             );
         },
@@ -134,7 +135,7 @@ export async function getTraceOutput(
     // Get the output, and replace it with an empty string for any future test
     return await browser.execute((playerElement) => {
         // https://github.com/webdriverio/webdriverio/issues/6486
-        const player = playerElement as unknown as Player;
+        const player = playerElement as unknown as Player.PlayerElement;
         const log = player.__ruffle_log__;
         player.__ruffle_log__ = "";
         return log;
@@ -178,7 +179,7 @@ export function loadJsAPI(swf?: string) {
         await injectRuffleAndWait(browser);
 
         player = (await browser.execute(() => {
-            const ruffle = (window.RufflePlayer as PublicAPI).newest();
+            const ruffle = (window.RufflePlayer as Setup.PublicAPI).newest();
             const player = ruffle!.createPlayer();
             const container = document.getElementById("test-container");
             container!.appendChild(player);
@@ -190,7 +191,7 @@ export function loadJsAPI(swf?: string) {
             await browser.execute(
                 async (player, swf) => {
                     // https://github.com/webdriverio/webdriverio/issues/6486
-                    await (player as unknown as Player).load(swf);
+                    await (player as unknown as Player.PlayerElement).load(swf);
                 },
                 player,
                 swf,

@@ -23,6 +23,8 @@ pub struct MenuBar {
 
 impl MenuBar {
     const SHORTCUT_FULLSCREEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F11);
+    const SHORTCUT_FULLSCREEN_WINDOWS: KeyboardShortcut =
+        KeyboardShortcut::new(Modifiers::ALT, Key::Enter);
     const SHORTCUT_OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
     const SHORTCUT_OPEN_ADVANCED: KeyboardShortcut =
         KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::O);
@@ -64,7 +66,14 @@ impl MenuBar {
                 player.set_is_playing(!player.is_playing());
             }
         }
-        if egui_ctx.input_mut(|input| input.consume_shortcut(&Self::SHORTCUT_FULLSCREEN)) {
+        let mut fullscreen_pressed =
+            egui_ctx.input_mut(|input| input.consume_shortcut(&Self::SHORTCUT_FULLSCREEN));
+        if cfg!(windows) && !fullscreen_pressed {
+            // TODO We can remove this shortcut when we add some kind of preferences.
+            fullscreen_pressed = egui_ctx
+                .input_mut(|input| input.consume_shortcut(&Self::SHORTCUT_FULLSCREEN_WINDOWS));
+        }
+        if fullscreen_pressed {
             if let Some(player) = &mut player {
                 let is_fullscreen = player.is_fullscreen();
                 player.set_fullscreen(!is_fullscreen);
@@ -119,7 +128,7 @@ impl MenuBar {
                             for bookmark in bookmarks.iter().filter(|x| !x.is_invalid()) {
                                 if Button::new(&bookmark.name).ui(ui).clicked() {
                                     ui.close_menu();
-                                    let _ = self.event_loop.send_event(RuffleEvent::OpenURL(bookmark.url.clone(), Box::new(self.default_launch_options.clone())));
+                                    let _ = self.event_loop.send_event(RuffleEvent::Open(bookmark.url.clone(), Box::new(self.default_launch_options.clone())));
                                 }
                             }
                         });
@@ -238,7 +247,7 @@ impl MenuBar {
                         for recent in recents {
                             if ui.button(&recent.name).clicked() {
                                 ui.close_menu();
-                                let _ = self.event_loop.send_event(RuffleEvent::OpenURL(
+                                let _ = self.event_loop.send_event(RuffleEvent::Open(
                                     recent.url.clone(),
                                     Box::new(self.default_launch_options.clone()),
                                 ));
@@ -427,7 +436,7 @@ impl MenuBar {
         if let Some((movie_url, opts)) = self.currently_opened.take() {
             let _ = self
                 .event_loop
-                .send_event(RuffleEvent::OpenURL(movie_url, opts.into()));
+                .send_event(RuffleEvent::Open(movie_url, opts.into()));
         }
         ui.close_menu();
     }

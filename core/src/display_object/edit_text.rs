@@ -162,6 +162,10 @@ pub struct EditTextData<'gc> {
     #[collect(require_static)]
     flags: EditTextFlag,
 
+    /// Flags specifying how layout debug boxes should be drawn.
+    #[collect(require_static)]
+    layout_debug_boxes_flags: LayoutDebugBoxesFlag,
+
     /// Whether this EditText represents an AVM2 TextLine.
     is_tlf: bool,
 
@@ -174,7 +178,7 @@ pub struct EditTextData<'gc> {
     last_click: Option<ClickEventData>,
 }
 
-impl<'gc> EditTextData<'gc> {
+impl EditTextData<'_> {
     fn vertical_scroll_offset(&self) -> Twips {
         if self.scroll > 1 {
             let lines = self.layout.lines();
@@ -304,6 +308,7 @@ impl<'gc> EditText<'gc> {
                 is_tlf: false,
                 restrict: EditTextRestrict::allow_all(),
                 last_click: None,
+                layout_debug_boxes_flags: LayoutDebugBoxesFlag::empty(),
             },
         ));
 
@@ -625,18 +630,20 @@ impl<'gc> EditText<'gc> {
         self.0.write(gc_context).is_tlf = is_tlf;
     }
 
-    pub fn draw_layout_boxes(self) -> bool {
-        self.0
-            .read()
-            .flags
-            .contains(EditTextFlag::DRAW_LAYOUT_BOXES)
+    pub fn layout_debug_boxes_flag(self, flag: LayoutDebugBoxesFlag) -> bool {
+        self.0.read().layout_debug_boxes_flags.contains(flag)
     }
 
-    pub fn set_draw_layout_boxes(self, context: &mut UpdateContext<'gc>, value: bool) {
+    pub fn set_layout_debug_boxes_flag(
+        self,
+        context: &mut UpdateContext<'gc>,
+        flag: LayoutDebugBoxesFlag,
+        value: bool,
+    ) {
         self.0
             .write(context.gc())
-            .flags
-            .set(EditTextFlag::DRAW_LAYOUT_BOXES, value);
+            .layout_debug_boxes_flags
+            .set(flag, value);
     }
 
     pub fn replace_text(
@@ -725,12 +732,6 @@ impl<'gc> EditText<'gc> {
         self.0.write(activation.context.gc_context).variable = variable;
         self.try_bind_text_field_variable(activation, true);
     }
-
-    /// Construct a base text transform for this `EditText`, to be used for
-    /// evaluating fonts.
-    ///
-    /// The `text_transform` constitutes the base transform that all text is
-    /// written into.
 
     /// Internal padding between the bounds of the EditText and the text.
     /// Applies to each side.
@@ -895,18 +896,65 @@ impl<'gc> EditText<'gc> {
         }
     }
 
+    fn render_debug_boxes(
+        self,
+        context: &mut RenderContext<'_, 'gc>,
+        flags: LayoutDebugBoxesFlag,
+        layout: &Layout<'gc>,
+    ) {
+        if flags.contains(LayoutDebugBoxesFlag::CHAR) {
+            for i in 0..self.text().len() {
+                if let Some(bounds) = layout.char_bounds(i) {
+                    context.draw_rect_outline(Color::MAGENTA, bounds, Twips::ONE);
+                }
+            }
+        }
+        if flags.contains(LayoutDebugBoxesFlag::BOX_INTERIOR) {
+            for lbox in layout.boxes_iter() {
+                context.draw_rect_outline(Color::RED, lbox.interior_bounds().into(), Twips::ONE);
+            }
+        }
+        if flags.contains(LayoutDebugBoxesFlag::BOX) {
+            for lbox in layout.boxes_iter() {
+                context.draw_rect_outline(Color::RED, lbox.bounds().into(), Twips::ONE);
+            }
+        }
+        if flags.contains(LayoutDebugBoxesFlag::LINE_INTERIOR) {
+            for line in layout.lines() {
+                context.draw_rect_outline(Color::BLUE, line.interior_bounds().into(), Twips::ONE);
+            }
+        }
+        if flags.contains(LayoutDebugBoxesFlag::LINE) {
+            for line in layout.lines() {
+                context.draw_rect_outline(Color::BLUE, line.bounds().into(), Twips::ONE);
+            }
+        }
+        if flags.contains(LayoutDebugBoxesFlag::TEXT) {
+            context.draw_rect_outline(Color::GREEN, layout.bounds().into(), Twips::ONE);
+        }
+        if flags.contains(LayoutDebugBoxesFlag::TEXT_EXTERIOR) {
+            context.draw_rect_outline(Color::GREEN, layout.exterior_bounds().into(), Twips::ONE);
+        }
+    }
+
+    fn render_layout_line(self, context: &mut RenderContext<'_, 'gc>, line: &LayoutLine<'gc>) {
+        for layout_box in line.boxes_iter() {
+            self.render_layout_box(context, layout_box);
+        }
+    }
+
     /// Render a layout box, plus its children.
     fn render_layout_box(self, context: &mut RenderContext<'_, 'gc>, lbox: &LayoutBox<'gc>) {
-        let origin = lbox.bounds().origin();
+        let origin = lbox.interior_bounds().origin();
 
         let edit_text = self.0.read();
 
         // If text's top is under the textbox's bottom, skip drawing.
         // TODO: FP actually skips drawing a line as soon as its bottom is under the textbox;
         //   Current logic is conservative for safety (and even of this I'm not 100% sure).
-        // TODO: we should also cull text that's above the textbox
-        //   (instead of culling, this can be implemented as having the loop start from `scrollY`th line)
         //   (maybe we could cull-before-render all glyphs, thus removing the need for masking?)
+        // [KJ] FP always displays the first visible line (sometimes masked, sometimes sticking out of bounds),
+        //      culls any other line which is not fully visible; masking is always used for left/right bounds
         // TODO: also cull text that's simply out of screen, just like we cull whole DOs in render_self().
         if origin.y() + Twips::from_pixels(Self::INTERNAL_PADDING)
             - edit_text.vertical_scroll_offset()
@@ -1291,9 +1339,9 @@ impl<'gc> EditText<'gc> {
         // First determine which line of text is the closest match to the Y position...
         let mut closest_line: Option<&LayoutLine> = None;
         for line in text.layout.lines().iter() {
-            if let Some(closest_extent_y) = closest_line.map(|l| l.bounds().extent_y()) {
-                if line.bounds().extent_y() > closest_extent_y
-                    && position.y >= line.bounds().offset_y()
+            if let Some(closest_extent_y) = closest_line.map(|l| l.interior_bounds().extent_y()) {
+                if line.interior_bounds().extent_y() > closest_extent_y
+                    && position.y >= line.interior_bounds().offset_y()
                 {
                     closest_line = Some(line);
                 }
@@ -1307,7 +1355,8 @@ impl<'gc> EditText<'gc> {
         if let Some(line) = closest_line {
             for layout_box in line.boxes_iter() {
                 if layout_box.is_text_box() {
-                    if position.x >= layout_box.bounds().offset_x() || closest_layout_box.is_none()
+                    if position.x >= layout_box.interior_bounds().offset_x()
+                        || closest_layout_box.is_none()
                     {
                         closest_layout_box = Some(layout_box);
                     } else {
@@ -1318,7 +1367,7 @@ impl<'gc> EditText<'gc> {
         }
 
         if let Some(layout_box) = closest_layout_box {
-            let origin = layout_box.bounds().origin();
+            let origin = layout_box.interior_bounds().origin();
             let mut matrix = Matrix::translate(origin.x(), origin.y());
             matrix = matrix.inverse().expect("Invertible layout matrix");
             let local_position = matrix * position;
@@ -1493,19 +1542,16 @@ impl<'gc> EditText<'gc> {
                     break 'paste;
                 }
 
-                let mut text = self.0.read().restrict.filter_allowed(&text);
+                let text = self.0.read().restrict.filter_allowed(&text);
+                let text = WString::from_utf8(&text);
+                let mut text = text.as_wstr();
 
                 if text.len() > self.available_chars() && self.available_chars() > 0 {
-                    text = text[0..self.available_chars()].to_owned();
+                    text = &text[0..self.available_chars()];
                 }
 
                 if text.len() <= self.available_chars() {
-                    self.replace_text(
-                        selection.start(),
-                        selection.end(),
-                        &WString::from_utf8(&text),
-                        context,
-                    );
+                    self.replace_text(selection.start(), selection.end(), text, context);
                     let new_pos = selection.start() + text.len();
                     if is_selectable {
                         self.set_selection(
@@ -1880,7 +1926,7 @@ impl<'gc> EditText<'gc> {
         let line = line.and_then(|line| layout.lines().get(line));
 
         let (boxes, union_bounds) = if let Some(line) = line {
-            (Either::Left(line.boxes_iter()), line.bounds())
+            (Either::Left(line.boxes_iter()), line.interior_bounds())
         } else {
             (Either::Right(layout.boxes_iter()), layout.bounds())
         };
@@ -1981,6 +2027,14 @@ impl<'gc> EditText<'gc> {
         Some(index - start_index)
     }
 
+    pub fn char_bounds(self, index: usize) -> Option<Rectangle<Twips>> {
+        let edit_text = self.0.read();
+        let bounds = edit_text.layout.char_bounds(index)?;
+        let padding = Twips::from_pixels(Self::INTERNAL_PADDING);
+        let bounds = Matrix::translate(padding, padding) * bounds;
+        Some(bounds)
+    }
+
     fn execute_avm1_asfunction(
         self,
         context: &mut UpdateContext<'gc>,
@@ -2043,7 +2097,7 @@ impl<'gc> EditText<'gc> {
         text.layout.boxes_iter().any(|layout| {
             layout.is_link()
                 && layout
-                    .bounds()
+                    .interior_bounds()
                     .contains(Position::from((position.x, position.y)))
         })
     }
@@ -2316,23 +2370,17 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
             ..Default::default()
         });
 
-        {
-            let draw_boxes = edit_text.flags.contains(EditTextFlag::DRAW_LAYOUT_BOXES);
-            if draw_boxes {
-                context.draw_rect_outline(
-                    Color::GREEN,
-                    edit_text.layout.exterior_bounds().into(),
-                    Twips::ONE,
-                );
-            }
-
-            for layout_box in edit_text.layout.boxes_iter() {
-                if draw_boxes {
-                    context.draw_rect_outline(Color::RED, layout_box.bounds().into(), Twips::ONE);
-                }
-                self.render_layout_box(context, layout_box);
-            }
+        // Skip lines that are off-screen.
+        let lines_to_skip = self.scroll().saturating_sub(1);
+        for line in edit_text.layout.lines().iter().skip(lines_to_skip) {
+            self.render_layout_line(context, line);
         }
+
+        self.render_debug_boxes(
+            context,
+            edit_text.layout_debug_boxes_flags,
+            &edit_text.layout,
+        );
 
         context.transform_stack.pop();
 
@@ -2711,7 +2759,6 @@ bitflags::bitflags! {
     struct EditTextFlag: u16 {
         const FIRING_VARIABLE_BINDING = 1 << 0;
         const HAS_BACKGROUND = 1 << 1;
-        const DRAW_LAYOUT_BOXES = 1 << 2;
         const CONDENSE_WHITE = 1 << 13;
         const ALWAYS_SHOW_SELECTION = 1 << 14;
 
@@ -2727,6 +2774,19 @@ bitflags::bitflags! {
         const NO_SELECT = 1 << 12;
         const SWF_FLAGS = Self::READ_ONLY.bits() | Self::PASSWORD.bits() | Self::MULTILINE.bits() | Self::WORD_WRAP.bits() | Self::USE_OUTLINES.bits() |
                           Self::HTML.bits() | Self::WAS_STATIC.bits() | Self::BORDER.bits() | Self::NO_SELECT.bits();
+    }
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy)]
+    pub struct LayoutDebugBoxesFlag: u8 {
+        const TEXT_EXTERIOR = 1 << 1;
+        const TEXT = 1 << 2;
+        const LINE = 1 << 3;
+        const LINE_INTERIOR = 1 << 4;
+        const BOX = 1 << 5;
+        const BOX_INTERIOR = 1 << 6;
+        const CHAR = 1 << 7;
     }
 }
 

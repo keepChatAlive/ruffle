@@ -1,4 +1,3 @@
-use crate::avm1::globals::system::SandboxType;
 use crate::avm1::Attribute;
 use crate::avm1::Avm1;
 use crate::avm1::Object;
@@ -15,11 +14,10 @@ use crate::backend::{
     log::LogBackend,
     navigator::{NavigatorBackend, Request},
     storage::StorageBackend,
-    ui::{InputManager, MouseCursor, UiBackend},
+    ui::{MouseCursor, UiBackend},
 };
 use crate::compatibility_rules::CompatibilityRules;
 use crate::config::Letterbox;
-use crate::context::GcContext;
 use crate::context::{ActionQueue, ActionType, RenderContext, UpdateContext};
 use crate::context_menu::{
     BuiltInItemFlags, ContextMenuCallback, ContextMenuItem, ContextMenuState,
@@ -35,6 +33,7 @@ use crate::external::{ExternalInterface, ExternalInterfaceProvider, NullFsComman
 use crate::external::{FsCommandProvider, Value as ExternalValue};
 use crate::focus_tracker::NavigationDirection;
 use crate::frame_lifecycle::{run_all_phases_avm2, FramePhase};
+use crate::input::InputManager;
 use crate::library::Library;
 use crate::limits::ExecutionLimit;
 use crate::loader::{LoadBehavior, LoadManager};
@@ -44,6 +43,7 @@ use crate::net_connection::NetConnections;
 use crate::prelude::*;
 use crate::socket::Sockets;
 use crate::streams::StreamManager;
+use crate::string::StringContext;
 use crate::string::{AvmString, AvmStringInterner};
 use crate::stub::StubCollection;
 use crate::tag_utils::SwfMovie;
@@ -374,9 +374,6 @@ pub struct Player {
 
     /// Any compatibility rules to apply for this movie.
     compatibility_rules: CompatibilityRules,
-
-    /// A map from gamepad buttons to key codes.
-    gamepad_button_mapping: HashMap<GamepadButton, KeyCode>,
 
     /// Debug UI windows
     #[cfg(feature = "egui")]
@@ -1008,31 +1005,8 @@ impl Player {
     ///    second wave of event processing.
     fn handle_input_event(&mut self, event: PlayerEvent) -> bool {
         let mut player_event_handled = false;
-        // Optionally transform gamepad button events into key events.
-        let event = match event {
-            PlayerEvent::GamepadButtonDown { button } => {
-                if let Some(key_code) = self.gamepad_button_mapping.get(&button) {
-                    PlayerEvent::KeyDown {
-                        key_code: *key_code,
-                        key_char: None,
-                    }
-                } else {
-                    // Just ignore this event.
-                    return false;
-                }
-            }
-            PlayerEvent::GamepadButtonUp { button } => {
-                if let Some(key_code) = self.gamepad_button_mapping.get(&button) {
-                    PlayerEvent::KeyUp {
-                        key_code: *key_code,
-                        key_char: None,
-                    }
-                } else {
-                    // Just ignore this event.
-                    return false;
-                }
-            }
-            _ => event,
+        let Some(event) = self.input.map_input_event(event) else {
+            return false;
         };
 
         let prev_mouse_buttons = self.input.get_mouse_down_buttons();
@@ -1049,8 +1023,8 @@ impl Player {
                 PlayerEvent::KeyDown {
                     key_code: KeyCode::V,
                     ..
-                } if self.input.is_key_down(KeyCode::Control)
-                    && self.input.is_key_down(KeyCode::Alt) =>
+                } if self.input.is_key_down(KeyCode::CONTROL)
+                    && self.input.is_key_down(KeyCode::ALT) =>
                 {
                     self.mutate_with_update_context(|context| {
                         let mut dumper = VariableDumper::new("  ");
@@ -1083,8 +1057,8 @@ impl Player {
                 PlayerEvent::KeyDown {
                     key_code: KeyCode::D,
                     ..
-                } if self.input.is_key_down(KeyCode::Control)
-                    && self.input.is_key_down(KeyCode::Alt) =>
+                } if self.input.is_key_down(KeyCode::CONTROL)
+                    && self.input.is_key_down(KeyCode::ALT) =>
                 {
                     self.mutate_with_update_context(|context| {
                         if context.avm1.show_debug_output() {
@@ -1105,8 +1079,8 @@ impl Player {
                 PlayerEvent::KeyDown {
                     key_code: KeyCode::F,
                     ..
-                } if self.input.is_key_down(KeyCode::Control)
-                    && self.input.is_key_down(KeyCode::Alt) =>
+                } if self.input.is_key_down(KeyCode::CONTROL)
+                    && self.input.is_key_down(KeyCode::ALT) =>
                 {
                     self.mutate_with_update_context(|context| {
                         context.stage.display_render_tree(0);
@@ -1117,33 +1091,15 @@ impl Player {
         }
 
         self.mutate_with_update_context(|context| {
-            let button_event = match event {
-                // ASCII characters convert directly to keyPress button events.
-                PlayerEvent::TextInput { codepoint }
-                    if codepoint as u32 >= 32 && codepoint as u32 <= 126 =>
-                {
-                    Some(ClipEvent::KeyPress {
-                        key_code: ButtonKeyCode::from_u8(codepoint as u8).unwrap(),
-                    })
-                }
-
-                // Special keys have custom values for keyPress.
-                PlayerEvent::KeyDown { key_code, .. } => {
-                    if let Some(key_code) = crate::events::key_code_to_button_key_code(key_code) {
-                        Some(ClipEvent::KeyPress { key_code })
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
+            let button_event = ButtonKeyCode::from_player_event(event)
+                .map(|key_code| ClipEvent::KeyPress { key_code });
 
             if let PlayerEvent::KeyDown { key_code, key_char }
             | PlayerEvent::KeyUp { key_code, key_char } = event
             {
-                let ctrl_key = context.input.is_key_down(KeyCode::Control);
-                let alt_key = context.input.is_key_down(KeyCode::Alt);
-                let shift_key = context.input.is_key_down(KeyCode::Shift);
+                let ctrl_key = context.input.is_key_down(KeyCode::CONTROL);
+                let alt_key = context.input.is_key_down(KeyCode::ALT);
+                let shift_key = context.input.is_key_down(KeyCode::SHIFT);
 
                 let mut activation = Avm2Activation::from_nothing(context);
 
@@ -1168,7 +1124,7 @@ impl Player {
                             true.into(),                             /* bubbles */
                             false.into(),                            /* cancelable */
                             key_char.map_or(0, |c| c as u32).into(), /* charCode */
-                            (key_code as u32).into(),                /* keyCode */
+                            key_code.value().into(),                 /* keyCode */
                             0.into(),                                /* keyLocation */
                             ctrl_key.into(),                         /* ctrlKey */
                             alt_key.into(),                          /* altKey */
@@ -1294,11 +1250,11 @@ impl Player {
             // KeyPress events also take precedence over tabbing.
             if !key_press_handled {
                 if let PlayerEvent::KeyDown {
-                    key_code: KeyCode::Tab,
+                    key_code: KeyCode::TAB,
                     ..
                 } = event
                 {
-                    let reversed = context.input.is_key_down(KeyCode::Shift);
+                    let reversed = context.input.is_key_down(KeyCode::SHIFT);
                     let tracker = context.focus_tracker;
                     tracker.cycle(context, reversed);
                 }
@@ -1311,7 +1267,7 @@ impl Player {
                     if matches!(
                         event,
                         PlayerEvent::KeyDown {
-                            key_code: KeyCode::Return,
+                            key_code: KeyCode::RETURN,
                             ..
                         } | PlayerEvent::TextInput { codepoint: ' ' }
                     ) {
@@ -2202,7 +2158,7 @@ impl Player {
                 ui: this.ui.deref_mut(),
                 action_queue,
                 gc_context,
-                interner,
+                strings: StringContext::from_parts(gc_context, interner),
                 stage,
                 mouse_data,
                 input: &this.input,
@@ -2369,9 +2325,12 @@ impl Player {
         self.mutate_with_update_context(|context| context.avm1.has_mouse_listener())
     }
 
-    pub fn add_external_interface(&mut self, provider: Box<dyn ExternalInterfaceProvider>) {
+    pub fn set_external_interface_provider(
+        &mut self,
+        provider: Option<Box<dyn ExternalInterfaceProvider>>,
+    ) {
         self.mutate_with_update_context(|context| {
-            context.external_interface.add_provider(provider)
+            context.external_interface.set_provider(provider)
         });
     }
 
@@ -2466,10 +2425,9 @@ pub struct PlayerBuilder {
     player_version: Option<u8>,
     player_runtime: PlayerRuntime,
     quality: StageQuality,
-    sandbox_type: SandboxType,
     page_url: Option<String>,
     frame_rate: Option<f64>,
-    external_interface_providers: Vec<Box<dyn ExternalInterfaceProvider>>,
+    external_interface_provider: Option<Box<dyn ExternalInterfaceProvider>>,
     fs_command_provider: Box<dyn FsCommandProvider>,
     #[cfg(feature = "known_stubs")]
     stub_report_output: Option<std::path::PathBuf>,
@@ -2518,10 +2476,9 @@ impl PlayerBuilder {
             player_version: None,
             player_runtime: PlayerRuntime::default(),
             quality: StageQuality::High,
-            sandbox_type: SandboxType::LocalTrusted,
             page_url: None,
             frame_rate: None,
-            external_interface_providers: vec![],
+            external_interface_provider: None,
             fs_command_provider: Box::new(NullFsCommandProvider),
             #[cfg(feature = "known_stubs")]
             stub_report_output: None,
@@ -2692,12 +2649,6 @@ impl PlayerBuilder {
         self
     }
 
-    /// Configures the security sandbox type (default is `SandboxType::LocalTrusted`)
-    pub fn with_sandbox_type(mut self, sandbox_type: SandboxType) -> Self {
-        self.sandbox_type = sandbox_type;
-        self
-    }
-
     // Configure the embedding page's URL (if applicable)
     pub fn with_page_url(mut self, page_url: Option<String>) -> Self {
         self.page_url = page_url;
@@ -2712,7 +2663,7 @@ impl PlayerBuilder {
 
     /// Adds an External Interface provider for movies to communicate with
     pub fn with_external_interface(mut self, provider: Box<dyn ExternalInterfaceProvider>) -> Self {
-        self.external_interface_providers.push(provider);
+        self.external_interface_provider = Some(provider);
         self
     }
 
@@ -2746,25 +2697,31 @@ impl PlayerBuilder {
         player_runtime: PlayerRuntime,
         fullscreen: bool,
         fake_movie: Arc<SwfMovie>,
-        external_interface_providers: Vec<Box<dyn ExternalInterfaceProvider>>,
+        external_interface_provider: Option<Box<dyn ExternalInterfaceProvider>>,
         fs_command_provider: Box<dyn FsCommandProvider>,
     ) -> GcRoot<'gc> {
         let mut interner = AvmStringInterner::new(gc_context);
-        let mut init = GcContext {
-            gc_context,
-            interner: &mut interner,
+        let (avm1, avm2) = {
+            // SAFETY: Extending this borrow to `'gc` is sound, as the result of this
+            // block implements `Collect`, preventing any `&'gc _` outliving it.
+            let interner: &'gc mut _ = unsafe { &mut *(&mut interner as *mut _) };
+            let mut init = StringContext::from_parts(gc_context, interner);
+            (
+                Avm1::new(&mut init, player_version),
+                Avm2::new(&mut init, player_version, player_runtime),
+            )
         };
 
         let data = GcRootData {
             audio_manager: AudioManager::new(),
             action_queue: ActionQueue::new(),
-            avm1: Avm1::new(&mut init, player_version),
-            avm2: Avm2::new(&mut init, player_version, player_runtime),
+            avm1,
+            avm2,
             interner,
             current_context_menu: None,
             drag_object: None,
             external_interface: ExternalInterface::new(
-                external_interface_providers,
+                external_interface_provider,
                 fs_command_provider,
             ),
             library: Library::empty(),
@@ -2858,7 +2815,7 @@ impl PlayerBuilder {
                 actions_since_timeout_check: 0,
 
                 // Input
-                input: Default::default(),
+                input: InputManager::new(self.gamepad_button_mapping),
                 mouse_in_stage: true,
                 mouse_position: Point::ZERO,
                 mouse_cursor: MouseCursor::Arrow,
@@ -2866,7 +2823,7 @@ impl PlayerBuilder {
 
                 // Misc. state
                 rng: SmallRng::seed_from_u64(get_current_date_time().timestamp_millis() as u64),
-                system: SystemProperties::new(self.sandbox_type),
+                system: SystemProperties::new(),
                 page_url: self.page_url.clone(),
                 transform_stack: TransformStack::new(),
                 instance_counter: 0,
@@ -2878,7 +2835,6 @@ impl PlayerBuilder {
                 load_behavior: self.load_behavior,
                 spoofed_url: self.spoofed_url.clone(),
                 compatibility_rules: self.compatibility_rules.clone(),
-                gamepad_button_mapping: self.gamepad_button_mapping,
                 stub_tracker: StubCollection::new(),
                 #[cfg(feature = "egui")]
                 debug_ui: Default::default(),
@@ -2891,7 +2847,7 @@ impl PlayerBuilder {
                         self.player_runtime,
                         self.fullscreen,
                         fake_movie.clone(),
-                        self.external_interface_providers,
+                        self.external_interface_provider,
                         self.fs_command_provider,
                     )
                 }))),
@@ -2923,6 +2879,12 @@ impl PlayerBuilder {
         }
 
         player_lock.mutate_with_update_context(|context| {
+            if !self.avm2_optimizer_enabled {
+                tracing::warn!(
+                    "AVM2 optimizer disabled, some bytecode verification will be missing"
+                );
+            }
+
             context
                 .avm2
                 .set_optimizer_enabled(self.avm2_optimizer_enabled);

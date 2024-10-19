@@ -160,8 +160,9 @@ pub struct MovieClipData<'gc> {
     frame_scripts: Vec<Option<Avm2Object<'gc>>>,
     #[collect(require_static)]
     flags: MovieClipFlags,
+    /// This is lazily allocated on demand, to make `MovieClipData` smaller in the common case.
     #[collect(require_static)]
-    drawing: Drawing,
+    drawing: Option<Box<Drawing>>,
     avm2_enabled: bool,
 
     /// Show a hand cursor when the clip is in button mode.
@@ -212,7 +213,7 @@ impl<'gc> MovieClip<'gc> {
                 clip_event_flags: ClipEventFlag::empty(),
                 frame_scripts: Vec::new(),
                 flags: MovieClipFlags::empty(),
-                drawing: Drawing::new(),
+                drawing: None,
                 avm2_enabled: true,
                 avm2_use_hand_cursor: true,
                 button_mode: false,
@@ -254,7 +255,7 @@ impl<'gc> MovieClip<'gc> {
                 clip_event_flags: ClipEventFlag::empty(),
                 frame_scripts: Vec::new(),
                 flags: MovieClipFlags::empty(),
-                drawing: Drawing::new(),
+                drawing: None,
                 avm2_enabled: true,
                 avm2_use_hand_cursor: true,
                 button_mode: false,
@@ -299,7 +300,7 @@ impl<'gc> MovieClip<'gc> {
                 clip_event_flags: ClipEventFlag::empty(),
                 frame_scripts: Vec::new(),
                 flags: MovieClipFlags::PLAYING,
-                drawing: Drawing::new(),
+                drawing: None,
                 avm2_enabled: true,
                 avm2_use_hand_cursor: true,
                 button_mode: false,
@@ -354,7 +355,7 @@ impl<'gc> MovieClip<'gc> {
                 clip_event_flags: ClipEventFlag::empty(),
                 frame_scripts: Vec::new(),
                 flags: MovieClipFlags::PLAYING,
-                drawing: Drawing::new(),
+                drawing: None,
                 avm2_enabled: true,
                 avm2_use_hand_cursor: true,
                 button_mode: false,
@@ -420,7 +421,7 @@ impl<'gc> MovieClip<'gc> {
                 clip_event_flags: ClipEventFlag::empty(),
                 frame_scripts: Vec::new(),
                 flags: MovieClipFlags::PLAYING,
-                drawing: Drawing::new(),
+                drawing: None,
                 avm2_enabled: true,
                 avm2_use_hand_cursor: true,
                 button_mode: false,
@@ -501,6 +502,21 @@ impl<'gc> MovieClip<'gc> {
 
     pub fn set_initialized(self, gc_context: &Mutation<'gc>) {
         self.0.write(gc_context).set_initialized(true);
+    }
+
+    /// Tries to fire events from our `LoaderInfo` object if we're ready - returns
+    /// `true` if both `init` and `complete` have been fired
+    pub fn try_fire_loaderinfo_events(self, context: &mut UpdateContext<'gc>) -> bool {
+        if self.0.read().initialized() {
+            if let Some(loader_info) = self
+                .loader_info()
+                .as_ref()
+                .and_then(|o| o.as_loader_info_object())
+            {
+                return loader_info.fire_init_and_complete_events(context, 0, false);
+            }
+        }
+        false
     }
 
     /// Preload a chunk of the movie.
@@ -2192,7 +2208,7 @@ impl<'gc> MovieClip<'gc> {
         if let Avm2Value::Object(object) = self.object2() {
             let mut constr_thing = || {
                 let mut activation = Avm2Activation::from_nothing(context);
-                class_object.call_native_init(object.into(), &[], &mut activation)?;
+                class_object.call_super_init(object.into(), &[], &mut activation)?;
 
                 Ok(())
             };
@@ -2335,10 +2351,17 @@ impl<'gc> MovieClip<'gc> {
         self.0.write(context.gc_context).button_mode = button_mode;
     }
 
-    pub fn drawing(&self, gc_context: &Mutation<'gc>) -> RefMut<'_, Drawing> {
+    pub fn drawing_mut(&self, gc_context: &Mutation<'gc>) -> RefMut<'_, Drawing> {
         // We're about to change graphics, so invalidate on the next frame
         self.invalidate_cached_bitmap(gc_context);
-        RefMut::map(self.0.write(gc_context), |s| &mut s.drawing)
+        RefMut::map(self.0.write(gc_context), |this| {
+            &mut **this.drawing.get_or_insert_with(Default::default)
+        })
+    }
+
+    pub fn drawing(&self) -> Option<Ref<'_, Drawing>> {
+        let read = Ref::map(self.0.read(), |s| &s.drawing);
+        Ref::filter_map(read, Option::as_deref).ok()
     }
 
     pub fn is_button_mode(&self, context: &mut UpdateContext<'gc>) -> bool {
@@ -2725,34 +2748,17 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         }
     }
 
-    fn on_exit_frame(&self, context: &mut UpdateContext<'gc>) {
-        // Attempt to fire an "init" event on our `LoaderInfo`.
-        // This fires after we've exited our first frame, but before
-        // but before we enter a new frame. `loader_stream_init`
-        // keeps track if an "init" event has already been fired,
-        // so this becomes a no-op after the event has been fired.
-        if self.0.read().initialized() {
-            if let Some(loader_info) = self
-                .loader_info()
-                .as_ref()
-                .and_then(|o| o.as_loader_info_object())
-            {
-                loader_info.fire_init_and_complete_events(context, 0, false);
-            }
-        }
-
-        for child in self.iter_render_list() {
-            child.on_exit_frame(context);
-        }
-    }
-
     fn render_self(&self, context: &mut RenderContext<'_, 'gc>) {
-        self.0.read().drawing.render(context);
+        if let Some(drawing) = self.drawing() {
+            drawing.render(context);
+        }
         self.render_children(context);
     }
 
     fn self_bounds(&self) -> Rectangle<Twips> {
-        self.0.read().drawing.self_bounds().clone()
+        self.drawing()
+            .map(|d| d.self_bounds().clone())
+            .unwrap_or_default()
     }
 
     fn hit_test_shape(
@@ -2803,8 +2809,10 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
             }
 
             let point = local_matrix * point;
-            if self.0.read().drawing.hit_test(point, &local_matrix) {
-                return true;
+            if let Some(drawing) = self.drawing() {
+                if drawing.hit_test(point, &local_matrix) {
+                    return true;
+                }
             }
         }
 
@@ -2824,7 +2832,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
     }
 
     fn as_drawing(&self, gc_context: &Mutation<'gc>) -> Option<RefMut<'_, Drawing>> {
-        Some(self.drawing(gc_context))
+        Some(self.drawing_mut(gc_context))
     }
 
     fn post_instantiation(
@@ -3149,8 +3157,10 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
             // Check drawing, because this selects the current clip, it must have mouse enabled
             if self.mouse_enabled() && check_non_interactive {
                 let point = local_matrix * point;
-                if self.0.read().drawing.hit_test(point, &local_matrix) {
-                    return Some(this);
+                if let Some(drawing) = self.drawing() {
+                    if drawing.hit_test(point, &local_matrix) {
+                        return Some(this);
+                    }
                 }
             }
         }
@@ -3238,8 +3248,11 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
                             Avm2MousePick::Miss
                         }
                     }
-                } else if child.as_interactive().is_none()
-                    && child.hit_test_shape(context, point, options)
+                } else if child.hit_test_shape(context, point, options)
+                    && child
+                        .masker()
+                        .map(|mask| mask.hit_test_shape(context, point, options))
+                        .unwrap_or(true)
                 {
                     if self.mouse_enabled() {
                         Avm2MousePick::Hit(this)
@@ -3290,12 +3303,14 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
             if self.world_bounds().contains(point) {
                 let point = local_matrix * point;
 
-                if self.0.read().drawing.hit_test(point, &local_matrix) {
-                    return if self.mouse_enabled() {
-                        Avm2MousePick::Hit((*self).into())
-                    } else {
-                        Avm2MousePick::PropagateToParent
-                    };
+                if let Some(drawing) = self.drawing() {
+                    if drawing.hit_test(point, &local_matrix) {
+                        return if self.mouse_enabled() {
+                            Avm2MousePick::Hit((*self).into())
+                        } else {
+                            Avm2MousePick::PropagateToParent
+                        };
+                    }
                 }
             }
         }
@@ -4238,11 +4253,7 @@ impl<'gc, 'a> MovieClipData<'gc> {
                     .exported_name
                     .write(context.gc_context) = Some(*name);
             } else {
-                tracing::warn!(
-                    "Registering export for non-movie clip: {} (ID: {})",
-                    name,
-                    id
-                );
+                // This is fairly common, don't log anything here
             }
         } else {
             tracing::warn!(
@@ -4873,12 +4884,6 @@ struct MovieClipStatic<'gc> {
     /// Preload progress for the given clip's tag stream.
     preload_progress: GcCell<'gc, PreloadProgress>,
 
-    /// Holds the tag offset for the furthest DoAbc/DoAbc2/SymbolClass tags that we've
-    /// already run. These tags are run as part of normal frame processing - this
-    /// is observable by ActionScript, which might load a class in a stop()'d MovieClip,
-    /// and then advance to a frame containing a SymbolClass that references the loaded class.
-    processed_bytecode_tags_pos: GcCell<'gc, i64>,
-
     // These two maps hold DoAbc/SymbolClass data that was loaded during preloading, but
     // hasn't yet been executed yet. The first time we encounter a frame, we will remove
     // the `Vec` from this map, and process it in `run_eager_script_and_symbol`
@@ -4923,7 +4928,6 @@ impl<'gc> MovieClipStatic<'gc> {
             avm2_class: GcCell::new(gc_context, None),
             loader_info,
             preload_progress: GcCell::new(gc_context, Default::default()),
-            processed_bytecode_tags_pos: GcCell::new(gc_context, -1),
             abc_tags: GcCell::new(gc_context, Default::default()),
             symbolclass_names: GcCell::new(gc_context, Default::default()),
         }

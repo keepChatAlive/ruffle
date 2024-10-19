@@ -16,7 +16,7 @@ use std::mem;
 use std::ops::{Deref, Range};
 use std::slice::Iter;
 use std::sync::Arc;
-use swf::{Point, Twips};
+use swf::{Point, Rectangle, Twips};
 
 /// Draw an underline on a particular drawing.
 ///
@@ -55,6 +55,9 @@ pub struct LayoutContext<'a, 'gc> {
 
     /// The position to put text into.
     ///
+    /// We are laying out boxes so that the cursor is at their baseline.
+    /// That way, they will be aligned properly when fixing up the line.
+    ///
     /// This cursor does not take indents, left margins, or alignment into
     /// account. Its X coordinate is always relative to the start of the
     /// current line, not the left edge of the text field being laid out.
@@ -68,6 +71,9 @@ pub struct LayoutContext<'a, 'gc> {
 
     /// The highest font size observed within the current line.
     max_font_size: Twips,
+
+    /// The highest ascent observed within the current line.
+    max_ascent: Twips,
 
     /// The growing list of layout lines to return when layout has finished.
     lines: Vec<LayoutLine<'gc>>,
@@ -120,6 +126,7 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
             font: None,
             text,
             max_font_size: Default::default(),
+            max_ascent: Default::default(),
             lines: Vec::new(),
             current_line_index: 0,
             boxes: Vec::new(),
@@ -182,12 +189,13 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
                         (starting_pos, underline_color)
                     {
                         if tf.underline.unwrap_or(false)
-                            && underline_baseline + linebox.bounds().origin().y()
+                            && underline_baseline + linebox.interior_bounds().origin().y()
                                 == starting_pos.y()
                             && underline_color == color
                         {
                             //Underline is at the same baseline, extend it
-                            current_width = Some(linebox.bounds().extent_x() - starting_pos.x());
+                            current_width =
+                                Some(linebox.interior_bounds().extent_x() - starting_pos.x());
 
                             line_extended = true;
                         }
@@ -209,10 +217,10 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
 
                         if tf.underline.unwrap_or(false) {
                             starting_pos = Some(
-                                linebox.bounds().origin()
+                                linebox.interior_bounds().origin()
                                     + Position::from((Twips::ZERO, underline_baseline)),
                             );
-                            current_width = Some(linebox.bounds().width());
+                            current_width = Some(linebox.interior_bounds().width());
                             underline_color = Some(color);
                         }
                     }
@@ -269,15 +277,15 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
 
             //Flash ignores trailing spaces when aligning lines, so should we
             if self.current_line_span.align != swf::TextAlign::Left {
-                linebox.bounds = linebox
-                    .bounds
-                    .with_size(font.measure(text.trim_end(), params, false).into());
+                linebox.interior_bounds = linebox
+                    .interior_bounds
+                    .with_size(font.measure(text.trim_end(), params).into());
             }
 
             if let Some(line_bounds) = &mut line_bounds {
-                *line_bounds += linebox.bounds;
+                *line_bounds += linebox.interior_bounds;
             } else {
-                line_bounds = Some(linebox.bounds);
+                line_bounds = Some(linebox.interior_bounds);
             }
 
             box_count += 1;
@@ -322,19 +330,20 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
         }
 
         box_count = 0;
-        for linebox in self.boxes.iter_mut() {
-            // TODO: This attempts to keep text of multiple font sizes vertically
-            // aligned correctly. It does not consider the baseline of the font,
-            // which is information we don't have yet.
-            let font_size_adjustment = self.max_font_size - linebox.bounds.height();
+        for layout_box in self.boxes.iter_mut() {
+            let baseline_adjustment = self.max_ascent;
 
-            if linebox.is_text_box() {
-                linebox.bounds += Position::from((
+            if layout_box.is_text_box() {
+                let position = Position::from((
                     left_adjustment + align_adjustment + (interim_adjustment * box_count),
-                    font_size_adjustment,
+                    baseline_adjustment,
                 ));
-            } else if linebox.is_bullet() {
-                linebox.bounds += Position::from((Default::default(), font_size_adjustment));
+                layout_box.interior_bounds += position;
+                layout_box.bounds += position;
+            } else if layout_box.is_bullet() {
+                let position = Position::from((Twips::ZERO, baseline_adjustment));
+                layout_box.interior_bounds += position;
+                layout_box.bounds += position;
             }
 
             box_count += 1;
@@ -362,6 +371,12 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
         let boxes = mem::take(&mut self.boxes);
         let first_box = boxes.first().unwrap();
         let start = first_box.start();
+        let interior_bounds = boxes
+            .iter()
+            .filter(|b| b.is_text_box())
+            .fold(first_box.interior_bounds, |bounds, b| {
+                bounds + b.interior_bounds
+            });
         let bounds = boxes
             .iter()
             .filter(|b| b.is_text_box())
@@ -376,6 +391,7 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
 
         self.lines.push(LayoutLine {
             index: self.current_line_index,
+            interior_bounds,
             bounds,
             start,
             end,
@@ -385,9 +401,9 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
 
         // Update layout bounds
         if let Some(lb) = &mut self.bounds {
-            *lb += bounds;
+            *lb += interior_bounds;
         } else {
-            self.bounds = Some(bounds);
+            self.bounds = Some(interior_bounds);
         }
     }
 
@@ -477,11 +493,15 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
 
     /// Enter a new span.
     fn newspan(&mut self, first_span: &TextSpan) {
+        let font_size = Twips::from_pixels(first_span.font.size);
+        let ascent = self.font.unwrap().get_baseline_for_height(font_size);
         if self.is_start_of_line() {
             self.current_line_span = first_span.clone();
-            self.max_font_size = Twips::from_pixels(first_span.font.size);
+            self.max_font_size = font_size;
+            self.max_ascent = ascent;
         } else {
-            self.max_font_size = max(self.max_font_size, Twips::from_pixels(first_span.font.size));
+            self.max_font_size = self.max_font_size.max(font_size);
+            self.max_ascent = self.max_ascent.max(ascent);
         }
     }
 
@@ -612,14 +632,20 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
     fn append_text_fragment(&mut self, text: &'a WStr, start: usize, end: usize, span: &TextSpan) {
         if let Some(font) = self.font {
             let params = EvalParameters::from_span(span);
-            let text_size = Size::from(font.measure(text, params, false));
-            let text_bounds = BoxBounds::from_position_and_size(self.cursor, text_size);
-            let mut new_text = LayoutBox::from_text(start, end, font, span);
+            let ascent = font.get_baseline_for_height(params.height());
+            let descent = font.get_descent_for_height(params.height());
+            let text_size = Size::from(font.measure(text, params));
+            let box_origin = self.cursor - (Twips::ZERO, ascent).into();
 
-            new_text.bounds = text_bounds;
+            let mut new_box = LayoutBox::from_text(text, start, end, font, span);
+            new_box.interior_bounds = BoxBounds::from_position_and_size(box_origin, text_size);
+            new_box.bounds = BoxBounds::from_position_and_size(
+                box_origin,
+                Size::from((text_size.width(), ascent + descent)),
+            );
 
-            self.cursor += Position::from((text_size.width(), Twips::default()));
-            self.append_box(new_text);
+            self.cursor += (text_size.width(), Twips::ZERO).into();
+            self.append_box(new_box);
         }
     }
 
@@ -643,13 +669,19 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
             );
 
             let params = EvalParameters::from_span(span);
+            let ascent = bullet_font.get_baseline_for_height(params.height());
+            let descent = bullet_font.get_descent_for_height(params.height());
             let bullet = WStr::from_units(&[0x2022u16]);
-            let text_size = Size::from(bullet_font.measure(bullet, params, false));
-            let text_bounds = BoxBounds::from_position_and_size(bullet_cursor, text_size);
+            let text_size = Size::from(bullet_font.measure(bullet, params));
+            let box_origin = bullet_cursor - (Twips::ZERO, ascent).into();
+
             let pos = self.last_box_end_position();
             let mut new_bullet = LayoutBox::from_bullet(pos, bullet_font, span);
-
-            new_bullet.bounds = text_bounds;
+            new_bullet.interior_bounds = BoxBounds::from_position_and_size(box_origin, text_size);
+            new_bullet.bounds = BoxBounds::from_position_and_size(
+                box_origin,
+                Size::from((text_size.width(), ascent + descent)),
+            );
 
             self.append_box(new_bullet);
         }
@@ -789,6 +821,13 @@ impl<'gc> Layout<'gc> {
         });
         result.ok()
     }
+
+    /// Returns char bounds of the given char relative to this layout.
+    pub fn char_bounds(&self, position: usize) -> Option<Rectangle<Twips>> {
+        let line_index = self.find_line_index_by_position(position)?;
+        let line = self.lines.get(line_index)?;
+        line.char_bounds(position)
+    }
 }
 
 /// A `LayoutLine` represents a single line of text.
@@ -801,10 +840,22 @@ pub struct LayoutLine<'gc> {
     index: usize,
 
     /// Line bounds.
-    /// It is a union of bounds of all layout
-    /// boxes contained within this line.
+    ///
+    /// They represent the area where this line is drawn.
+    /// Their height will be equal to the largest character
+    /// height (ascent + descent) on this line, leading is not included.
     #[collect(require_static)]
     bounds: BoxBounds<Twips>,
+
+    /// Interior line bounds.
+    ///
+    /// It is a union of interior bounds of all layout
+    /// boxes contained within this line.
+    ///
+    /// TODO This probably shouldn't be used, we should
+    ///   always prefer bounds, not interior_bounds.
+    #[collect(require_static)]
+    interior_bounds: BoxBounds<Twips>,
 
     /// The start position of the line (inclusive).
     start: usize,
@@ -826,6 +877,10 @@ impl<'gc> LayoutLine<'gc> {
         self.bounds
     }
 
+    pub fn interior_bounds(&self) -> BoxBounds<Twips> {
+        self.interior_bounds
+    }
+
     pub fn start(&self) -> usize {
         self.start
     }
@@ -843,15 +898,45 @@ impl<'gc> LayoutLine<'gc> {
     }
 
     pub fn offset_y(&self) -> Twips {
-        self.bounds().offset_y()
+        self.interior_bounds().offset_y()
     }
 
     pub fn extent_y(&self) -> Twips {
-        self.bounds().extent_y()
+        self.interior_bounds().extent_y()
     }
 
     pub fn boxes_iter(&self) -> Iter<'_, LayoutBox<'gc>> {
         self.boxes.iter()
+    }
+
+    pub fn find_box_index_by_position(&self, position: usize) -> Option<usize> {
+        let result = self.boxes.binary_search_by(|probe| {
+            if probe.end() <= position {
+                Ordering::Less
+            } else if position < probe.start() {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        });
+        result.ok()
+    }
+
+    /// Returns char bounds of the given char relative to the whole layout.
+    pub fn char_bounds(&self, position: usize) -> Option<Rectangle<Twips>> {
+        let box_index = self.find_box_index_by_position(position)?;
+        let layout_box = self.boxes.get(box_index)?;
+
+        let line_bounds = self.bounds();
+        let origin_x = layout_box.bounds().origin().x();
+        let x_bounds = layout_box.char_x_bounds(position)?;
+
+        Some(Rectangle {
+            x_min: origin_x + x_bounds.0,
+            x_max: origin_x + x_bounds.1,
+            y_min: line_bounds.offset_y(),
+            y_max: line_bounds.extent_y(),
+        })
     }
 }
 
@@ -861,11 +946,22 @@ impl<'gc> LayoutLine<'gc> {
 #[derive(Clone, Debug, Collect)]
 #[collect(no_drop)]
 pub struct LayoutBox<'gc> {
-    /// The rectangle corresponding to the outer boundaries of the content box.
+    /// Outer bounds of this layout box.
+    ///
+    /// The width of those bounds is equal to the width of the glyphs inside,
+    /// whereas the height is equal to the font height (ascent + descent).
     ///
     /// TODO Currently, only text boxes have meaningful bounds.
     #[collect(require_static)]
     bounds: BoxBounds<Twips>,
+
+    /// The rectangle corresponding to the bounds of the rendered content,
+    /// i.e. the smallest rectangle that contains all glyphs.
+    ///
+    /// TODO Currently, only text boxes have meaningful bounds.
+    /// TODO [KJ] Can't we replace it with bounds?
+    #[collect(require_static)]
+    interior_bounds: BoxBounds<Twips>,
 
     /// What content is contained by the content box.
     content: LayoutContent<'gc>,
@@ -903,6 +999,21 @@ pub enum LayoutContent<'gc> {
         /// The color to render the font with.
         #[collect(require_static)]
         color: swf::Color,
+
+        /// List of end positions (relative to this box) for each character.
+        ///
+        /// By having this here, we do not have to reevaluate the font
+        /// each time we want to get the position of a character,
+        /// and we can use this data along with layout box bounds to
+        /// calculate character bounds.
+        ///
+        /// For instance, for the text "hello", this field may contain:
+        ///
+        /// ```text
+        /// [100, 200, 250, 300, 400]
+        /// ```
+        #[collect(require_static)]
+        char_end_pos: Vec<Twips>,
     },
 
     /// A layout box containing a bullet.
@@ -944,7 +1055,7 @@ pub enum LayoutContent<'gc> {
     },
 }
 
-impl<'gc> Debug for LayoutContent<'gc> {
+impl Debug for LayoutContent<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             LayoutContent::Text { start, end, .. } => f
@@ -966,10 +1077,22 @@ impl<'gc> Debug for LayoutContent<'gc> {
 
 impl<'gc> LayoutBox<'gc> {
     /// Construct a text box for a text node.
-    pub fn from_text(start: usize, end: usize, font: Font<'gc>, span: &TextSpan) -> Self {
+    pub fn from_text(
+        text: &WStr,
+        start: usize,
+        end: usize,
+        font: Font<'gc>,
+        span: &TextSpan,
+    ) -> Self {
         let params = EvalParameters::from_span(span);
+        let mut char_end_pos = Vec::with_capacity(end - start);
+
+        font.evaluate(text, Default::default(), params, |_, _, _, advance, x| {
+            char_end_pos.push(x + advance);
+        });
 
         Self {
+            interior_bounds: Default::default(),
             bounds: Default::default(),
             content: LayoutContent::Text {
                 start,
@@ -978,6 +1101,7 @@ impl<'gc> LayoutBox<'gc> {
                 font,
                 params,
                 color: span.font.color,
+                char_end_pos,
             },
         }
     }
@@ -987,6 +1111,7 @@ impl<'gc> LayoutBox<'gc> {
         let params = EvalParameters::from_span(span);
 
         Self {
+            interior_bounds: Default::default(),
             bounds: Default::default(),
             content: LayoutContent::Bullet {
                 position,
@@ -1001,6 +1126,7 @@ impl<'gc> LayoutBox<'gc> {
     /// Construct a drawing.
     pub fn from_drawing(position: usize, drawing: Drawing) -> Self {
         Self {
+            interior_bounds: Default::default(),
             bounds: Default::default(),
             content: LayoutContent::Drawing { position, drawing },
         }
@@ -1134,6 +1260,10 @@ impl<'gc> LayoutBox<'gc> {
         self.bounds
     }
 
+    pub fn interior_bounds(&self) -> BoxBounds<Twips> {
+        self.interior_bounds
+    }
+
     pub fn content(&self) -> &LayoutContent<'gc> {
         &self.content
     }
@@ -1166,6 +1296,7 @@ impl<'gc> LayoutBox<'gc> {
                 font,
                 params,
                 color,
+                ..
             } => Some((
                 text.slice(*start..*end)?,
                 text_format,
@@ -1221,6 +1352,24 @@ impl<'gc> LayoutBox<'gc> {
             LayoutContent::Bullet { position, .. } => *position,
             LayoutContent::Drawing { position, .. } => *position,
         }
+    }
+
+    /// Return x-axis char bounds of the given char relative to this layout box.
+    pub fn char_x_bounds(&self, position: usize) -> Option<(Twips, Twips)> {
+        let relative_position = position.checked_sub(self.start())?;
+
+        let LayoutContent::Text { char_end_pos, .. } = &self.content else {
+            return None;
+        };
+
+        Some(if relative_position == 0 {
+            (Twips::ZERO, *char_end_pos.get(0)?)
+        } else {
+            (
+                *char_end_pos.get(relative_position - 1)?,
+                *char_end_pos.get(relative_position)?,
+            )
+        })
     }
 }
 

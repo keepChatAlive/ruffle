@@ -221,7 +221,7 @@ impl<'gc> Domain<'gc> {
 
         if let Some(class) = class {
             if let Some(param) = multiname.param() {
-                if !param.is_any_name() {
+                if let Some(param) = param {
                     if let Some(resolved_param) = self.get_class(context, &param) {
                         return Some(Class::with_type_param(context, class, Some(resolved_param)));
                     }
@@ -427,10 +427,10 @@ impl<'gc> Domain<'gc> {
 
 pub enum DomainPtr {}
 
-impl<'gc> PartialEq for Domain<'gc> {
+impl PartialEq for Domain<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.0.as_ptr() == other.0.as_ptr()
     }
 }
 
-impl<'gc> Eq for Domain<'gc> {}
+impl Eq for Domain<'_> {}

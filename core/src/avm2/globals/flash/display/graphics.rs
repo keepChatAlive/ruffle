@@ -416,58 +416,58 @@ pub fn draw_rect<'gc>(
     Ok(Value::Undefined)
 }
 
-/// Length between two points on a unit circle that are 45 degrees apart from
-/// one another.
-///
-/// This constant is `H`, short for 'hypotenuse', because it is also the length
-/// of the hypotenuse formed from the control point triangle of any quadratic
-/// Bezier curve approximating a 45-degree unit circle arc.
-///
-/// The derivation of this constant - or a similar constant for any other arc
-/// angle hypotenuse - is as follows:
-///
-/// 1. Call the arc angle `alpha`. In this special case, `alpha` is 45 degrees,
-///    or one-quarter `PI`.
-/// 2. Consider the triangle formed by the center of the circle and the two
-///    points at the start and end of the arc. The two other angles will be
-///    equal, and it and `alpha` sum to 180 degrees. We'll call this angle
-///    `beta`, and it is equal to `alpha` minus 180 degrees, divided by 2.
-/// 3. Using the law of sines, we know that the sine of `alpha` divided by `H`
-///    is equal to the sine of `beta` divided by `r`, where `r` is the radius
-///    of the circle. We can solve for `H` to get the result. Note that since
-///    this is a unit circle, you won't see a radius term in this constant.
-//const H:f64 = (PI * 0.25).sin() / (PI * 0.375).sin();
+// /// Length between two points on a unit circle that are 45 degrees apart from
+// /// one another.
+// ///
+// /// This constant is `H`, short for 'hypotenuse', because it is also the length
+// /// of the hypotenuse formed from the control point triangle of any quadratic
+// /// Bezier curve approximating a 45-degree unit circle arc.
+// ///
+// /// The derivation of this constant - or a similar constant for any other arc
+// /// angle hypotenuse - is as follows:
+// ///
+// /// 1. Call the arc angle `alpha`. In this special case, `alpha` is 45 degrees,
+// ///    or one-quarter `PI`.
+// /// 2. Consider the triangle formed by the center of the circle and the two
+// ///    points at the start and end of the arc. The two other angles will be
+// ///    equal, and it and `alpha` sum to 180 degrees. We'll call this angle
+// ///    `beta`, and it is equal to `alpha` minus 180 degrees, divided by 2.
+// /// 3. Using the law of sines, we know that the sine of `alpha` divided by `H`
+// ///    is equal to the sine of `beta` divided by `r`, where `r` is the radius
+// ///    of the circle. We can solve for `H` to get the result. Note that since
+// ///    this is a unit circle, you won't see a radius term in this constant.
+// const H:f64 = (PI * 0.25).sin() / (PI * 0.375).sin();
 
-/// Length between two control points of a quadratic Bezier curve approximating
-/// a 45-degree arc of a unit circle.
-///
-/// This constant is critical to calculating the off-curve point of the control
-/// point triangle. We do so by taking the tangents at each on-curve point,
-/// which point in the direction of the off-curve points. Then, we scale one of
-/// those tangent vectors by `A_B` and add it to the on-curve point to get the
-/// off-curve point, constructing our Bezier.
-///
-/// The derivation of this constant - or a similar constant for any other arc
-/// angle Bezier - is as follows:
-///
-/// 1. Start with the value of `H` for the given arc angle `alpha`.
-/// 2. Consider the triangle formed by the three control points of our desired
-///    Bezier curve. We'll call the angle at the off-curve control point
-///    `delta`, and the two other angles of this triangle are `gamma`.
-/// 3. Because two of the lines of this triangle are tangent lines of the
-///    circle, they will form a right angle with the normal, which is the same
-///    as the line between the center of the circle and the point.
-///    Coincidentally, this right angle is shared between `beta`, meaning that
-///    we can subtract it from 90 degrees to obtain `gamma`. Or, after some
-///    elementary algebra, just take half of `alpha`.
-/// 4. We can then derive the value of `delta` by subtracting out the other two
-///    `gamma`s from 180 degrees. This, again, can be simplified to just
-///    180 degrees minus `alpha`.
-/// 5. By the law of sines, the sine of `delta` divided by `H` is equal to
-///    the sine of `gamma` divided by `A_B`. We can then rearrange this to get
-///    `H` times the sine of `gamma`, divided by the sine of `delta`; which is
-///    our `A_B` constant.
-//const A_B:f64 = H * (PI * 0.125).sin() / (PI * 0.75).sin();
+// /// Length between two control points of a quadratic Bezier curve approximating
+// /// a 45-degree arc of a unit circle.
+// ///
+// /// This constant is critical to calculating the off-curve point of the control
+// /// point triangle. We do so by taking the tangents at each on-curve point,
+// /// which point in the direction of the off-curve points. Then, we scale one of
+// /// those tangent vectors by `A_B` and add it to the on-curve point to get the
+// /// off-curve point, constructing our Bezier.
+// ///
+// /// The derivation of this constant - or a similar constant for any other arc
+// /// angle Bezier - is as follows:
+// ///
+// /// 1. Start with the value of `H` for the given arc angle `alpha`.
+// /// 2. Consider the triangle formed by the three control points of our desired
+// ///    Bezier curve. We'll call the angle at the off-curve control point
+// ///    `delta`, and the two other angles of this triangle are `gamma`.
+// /// 3. Because two of the lines of this triangle are tangent lines of the
+// ///    circle, they will form a right angle with the normal, which is the same
+// ///    as the line between the center of the circle and the point.
+// ///    Coincidentally, this right angle is shared between `beta`, meaning that
+// ///    we can subtract it from 90 degrees to obtain `gamma`. Or, after some
+// ///    elementary algebra, just take half of `alpha`.
+// /// 4. We can then derive the value of `delta` by subtracting out the other two
+// ///    `gamma`s from 180 degrees. This, again, can be simplified to just
+// ///    180 degrees minus `alpha`.
+// /// 5. By the law of sines, the sine of `delta` divided by `H` is equal to
+// ///    the sine of `gamma` divided by `A_B`. We can then rearrange this to get
+// ///    `H` times the sine of `gamma`, divided by the sine of `delta`; which is
+// ///    our `A_B` constant.
+// const A_B:f64 = H * (PI * 0.125).sin() / (PI * 0.75).sin();
 
 /// A list of five quadratic Bezier control points, intended to approximate the
 /// bottom-right quadrant of a unit circle.
@@ -1205,8 +1205,6 @@ pub fn draw_graphics_data<'gc>(
         .get_object(activation, 0, "graphicsData")?
         .as_vector_storage()
     {
-        //assert_eq!(vector.value_type(), Some(activation.avm2().classes().igraphicsdata));
-
         let this = this.as_display_object().expect("Bad this");
 
         if let Some(mut drawing) = this.as_drawing(activation.context.gc_context) {
@@ -1275,11 +1273,7 @@ pub fn read_graphics_data<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     avm2_stub_method!(activation, "flash.display.Graphics", "readGraphicsData");
-    let value_type = activation
-        .avm2()
-        .classes()
-        .igraphicsdata
-        .inner_class_definition();
+    let value_type = activation.avm2().class_defs().igraphicsdata;
     let new_storage = VectorStorage::new(0, false, Some(value_type), activation);
     Ok(VectorObject::from_vector(new_storage, activation)?.into())
 }
@@ -1289,17 +1283,9 @@ fn read_point<'gc>(
     data: &VectorStorage<'gc>,
     data_index: &mut usize,
 ) -> Option<Point<Twips>> {
-    let x = data
-        .get(*data_index, activation)
-        .ok()?
-        .as_number(activation.context.gc_context)
-        .expect("data is not a Vec.<Number>");
+    let x = data.get(*data_index, activation).ok()?.as_f64();
 
-    let y = data
-        .get(*data_index + 1, activation)
-        .ok()?
-        .as_number(activation.context.gc_context)
-        .expect("data is not a Vec.<Number>");
+    let y = data.get(*data_index + 1, activation).ok()?.as_f64();
 
     *data_index += 2;
 
@@ -1401,8 +1387,7 @@ fn process_commands<'gc>(
         let command = commands
             .get(i, activation)
             .expect("missing command")
-            .as_integer(activation.context.gc_context)
-            .expect("commands is not a Vec.<int>");
+            .as_i32();
 
         if process_command(activation, drawing, data, command, &mut data_index).is_none() {
             break;
@@ -1422,39 +1407,15 @@ fn handle_igraphics_data<'gc>(
 ) -> Result<(), Error<'gc>> {
     let class = obj.instance_class();
 
-    if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsbitmapfill
-            .inner_class_definition()
-    {
+    if class == activation.avm2().class_defs().graphicsbitmapfill {
         let style = handle_bitmap_fill(activation, drawing, obj)?;
         drawing.set_fill_style(Some(style));
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsendfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsendfill {
         drawing.set_fill_style(None);
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsgradientfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsgradientfill {
         let style = handle_gradient_fill(activation, obj)?;
         drawing.set_fill_style(Some(style));
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicspath
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicspath {
         let commands = obj
             .get_public_property("commands", activation)?
             .coerce_to_object(activation)?;
@@ -1476,31 +1437,13 @@ fn handle_igraphics_data<'gc>(
             &data.as_vector_storage().expect("data is not a Vector"),
             winding,
         )?;
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicssolidfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicssolidfill {
         let style = handle_solid_fill(activation, obj)?;
         drawing.set_fill_style(Some(style));
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsshaderfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsshaderfill {
         tracing::warn!("Graphics shader fill unimplemented {:?}", class);
         drawing.set_fill_style(None);
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsstroke
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsstroke {
         let thickness = obj
             .get_public_property("thickness", activation)?
             .coerce_to_number(activation)?;
@@ -1556,13 +1499,7 @@ fn handle_igraphics_data<'gc>(
 
             drawing.set_line_style(Some(line_style));
         }
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicstrianglepath
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicstrianglepath {
         handle_graphics_triangle_path(activation, drawing, obj)?;
     } else {
         panic!("Unknown graphics data class {:?}", class);
@@ -1610,48 +1547,18 @@ fn handle_igraphics_fill<'gc>(
 ) -> Result<Option<FillStyle>, Error<'gc>> {
     let class = obj.instance_class();
 
-    if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsbitmapfill
-            .inner_class_definition()
-    {
+    if class == activation.avm2().class_defs().graphicsbitmapfill {
         let style = handle_bitmap_fill(activation, drawing, obj)?;
         Ok(Some(style))
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsendfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsendfill {
         Ok(None)
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsgradientfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsgradientfill {
         let style = handle_gradient_fill(activation, obj)?;
         Ok(Some(style))
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicssolidfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicssolidfill {
         let style = handle_solid_fill(activation, obj)?;
         Ok(Some(style))
-    } else if class
-        == activation
-            .avm2()
-            .classes()
-            .graphicsshaderfill
-            .inner_class_definition()
-    {
+    } else if class == activation.avm2().class_defs().graphicsshaderfill {
         tracing::warn!("Graphics shader fill unimplemented {:?}", class);
         Ok(None)
     } else {

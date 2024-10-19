@@ -27,7 +27,6 @@ use swf::{BlendMode, ColorTransform, Fixed8, Rectangle, Twips};
 /// This will allow us to be able to optimise the implementations and share the
 /// same code between VMs.
 #[allow(clippy::too_many_arguments)]
-
 pub fn fill_rect<'gc>(
     mc: &Mutation<'gc>,
     renderer: &mut dyn RenderBackend,
@@ -45,7 +44,9 @@ pub fn fill_rect<'gc>(
         return;
     }
 
-    let target = if rect.width() == target.width() && rect.height() == target.height() {
+    let is_full = rect.width() == target.width() && rect.height() == target.height();
+
+    let target = if is_full {
         // If we're filling the whole region, we can discard the gpu data
         target.overwrite_cpu_pixels_from_gpu(mc).0
     } else {
@@ -55,9 +56,11 @@ pub fn fill_rect<'gc>(
     let mut write = target.write(mc);
     let color = Color::from(color).to_premultiplied_alpha(write.transparency());
 
-    for y in rect.y_min..rect.y_max {
-        for x in rect.x_min..rect.x_max {
-            write.set_pixel32_raw(x, y, color);
+    if is_full {
+        write.fill(color);
+    } else {
+        for y in rect.y_min..rect.y_max {
+            write.set_pixel32_row_raw(rect.x_min, rect.x_max, y, color);
         }
     }
     write.set_cpu_dirty(mc, rect);
@@ -1206,6 +1209,17 @@ pub fn apply_filter<'gc>(
     dest_point: (u32, u32),
     filter: Filter,
 ) {
+    // Prevent creating 0x0 textures.
+    // FIXME: this is not correct.
+    // Currently at minimum, applyFilter(blur) is bugged in that
+    // it doesn't include the blur's dimensions (see calculate_dest_rect).
+    // In other words, blur with 0x0 source rect is not supposed to be a noop.
+    // Once it is fixed, this check should be removed or replaced by
+    // "if after including size adjustment the size is still 0, return".
+    if source_size.0 == 0 || source_size.1 == 0 {
+        return;
+    }
+
     if !context.renderer.is_filter_supported(&filter) {
         let mut source_region = PixelRegion::for_whole_size(source.width(), source.height());
         let mut dest_region = PixelRegion::for_whole_size(target.width(), target.height());
@@ -1654,8 +1668,8 @@ pub fn set_vector<'gc>(
             let color = iter
                 .next()
                 .expect("BitmapData.setVector: Expected element")
-                .as_u32(activation.context.gc_context)
-                .expect("BitmapData.setVector: Expected uint vector");
+                .as_u32();
+
             bitmap_data.set_pixel32_raw(
                 x,
                 y,

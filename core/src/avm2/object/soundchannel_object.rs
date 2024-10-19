@@ -9,7 +9,7 @@ use crate::backend::audio::SoundInstanceHandle;
 use crate::context::UpdateContext;
 use crate::display_object::SoundTransform;
 use core::fmt;
-use gc_arena::{Collect, Gc, GcWeak, Mutation};
+use gc_arena::{Collect, Gc, GcWeak};
 use std::cell::{Cell, RefCell};
 
 /// A class instance allocator that allocates SoundChannel objects.
@@ -95,9 +95,8 @@ impl<'gc> SoundChannelObject<'gc> {
                 position: Cell::new(0.0),
             },
         ));
-        sound_object.install_instance_slots(activation.context.gc_context);
 
-        class.call_native_init(Value::Object(sound_object.into()), &[], activation)?;
+        class.call_super_init(Value::Object(sound_object.into()), &[], activation)?;
 
         Ok(sound_object)
     }
@@ -216,10 +215,6 @@ impl<'gc> TObject<'gc> for SoundChannelObject<'gc> {
 
     fn as_ptr(&self) -> *const ObjectPtr {
         Gc::as_ptr(self.0) as *const ObjectPtr
-    }
-
-    fn value_of(&self, _mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>> {
-        Ok(Object::from(*self).into())
     }
 
     fn as_sound_channel(self) -> Option<SoundChannelObject<'gc>> {

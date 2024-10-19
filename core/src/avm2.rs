@@ -4,19 +4,21 @@ use std::rc::Rc;
 
 use crate::avm2::class::AllocatorFn;
 use crate::avm2::error::make_error_1107;
-use crate::avm2::globals::SystemClasses;
+use crate::avm2::globals::{
+    init_builtin_system_classes, init_native_system_classes, SystemClassDefs, SystemClasses,
+};
 use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::scope::ScopeChain;
 use crate::avm2::script::{Script, TranslationUnit};
-use crate::context::{GcContext, UpdateContext};
+use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, DisplayObjectWeak, TDisplayObject};
-use crate::string::AvmString;
+use crate::string::{AvmString, StringContext};
 use crate::tag_utils::SwfMovie;
 use crate::PlayerRuntime;
 
 use fnv::FnvHashMap;
 use gc_arena::lock::GcRefLock;
-use gc_arena::{Collect, Mutation};
+use gc_arena::{Collect, Gc, Mutation};
 use std::sync::Arc;
 use swf::avm2::read::Reader;
 use swf::DoAbc2Flag;
@@ -79,8 +81,8 @@ pub use crate::avm2::domain::{Domain, DomainPtr};
 pub use crate::avm2::error::Error;
 pub use crate::avm2::flv::FlvValueAvm2Ext;
 pub use crate::avm2::globals::flash::ui::context_menu::make_context_menu_state;
-pub use crate::avm2::multiname::Multiname;
-pub use crate::avm2::namespace::Namespace;
+pub use crate::avm2::multiname::{CommonMultinames, Multiname};
+pub use crate::avm2::namespace::{CommonNamespaces, Namespace};
 pub use crate::avm2::object::{
     ArrayObject, BitmapDataObject, ClassObject, EventObject, Object, SoundChannelObject,
     StageObject, TObject,
@@ -91,9 +93,10 @@ pub use crate::avm2::value::Value;
 use self::api_version::ApiVersion;
 use self::object::WeakObject;
 use self::scope::Scope;
-use num_traits::FromPrimitive;
 
 const BROADCAST_WHITELIST: [&str; 4] = ["enterFrame", "exitFrame", "frameConstructed", "render"];
+
+const PREALLOCATED_STACK_SIZE: usize = 120000;
 
 /// The state of an AVM2 interpreter.
 #[derive(Collect)]
@@ -126,29 +129,17 @@ pub struct Avm2<'gc> {
     /// System classes.
     system_classes: Option<SystemClasses<'gc>>,
 
+    /// System class definitions.
+    system_class_defs: Option<SystemClassDefs<'gc>>,
+
     /// Top-level global object. It contains most top-level types (Object, Class) and functions.
     /// However, it's not strictly defined which items end up there.
     toplevel_global_object: Option<Object<'gc>>,
 
-    /// The public namespace, versioned with `ApiVersion::ALL_VERSIONS`.
-    /// When calling into user code, you should almost always use `find_public_namespace`
-    /// instead, as it will return the correct version for the current call stack.
-    public_namespace_base_version: Namespace<'gc>,
-    // FIXME - make this an enum map once gc-arena supports it
-    public_namespaces: Vec<Namespace<'gc>>,
-    public_namespace_vm_internal: Namespace<'gc>,
-    pub internal_namespace: Namespace<'gc>,
-    pub as3_namespace: Namespace<'gc>,
-    pub vector_public_namespace: Namespace<'gc>,
-    pub vector_internal_namespace: Namespace<'gc>,
-    pub proxy_namespace: Namespace<'gc>,
-    // these are required to facilitate shared access between Rust and AS
-    pub flash_display_internal: Namespace<'gc>,
-    pub flash_utils_internal: Namespace<'gc>,
-    pub flash_geom_internal: Namespace<'gc>,
-    pub flash_events_internal: Namespace<'gc>,
-    pub flash_text_engine_internal: Namespace<'gc>,
-    pub flash_net_internal: Namespace<'gc>,
+    /// Pre-created known namespaces.
+    namespaces: Gc<'gc, CommonNamespaces<'gc>>,
+
+    pub multinames: Gc<'gc, CommonMultinames<'gc>>,
 
     #[collect(require_static)]
     native_method_table: &'static [Option<(&'static str, NativeMethodImpl)>],
@@ -157,7 +148,7 @@ pub struct Avm2<'gc> {
     native_instance_allocator_table: &'static [Option<(&'static str, AllocatorFn)>],
 
     #[collect(require_static)]
-    native_instance_init_table: &'static [Option<(&'static str, NativeMethodImpl)>],
+    native_super_initializer_table: &'static [Option<(&'static str, NativeMethodImpl)>],
 
     #[collect(require_static)]
     native_call_handler_table: &'static [Option<(&'static str, NativeMethodImpl)>],
@@ -200,60 +191,36 @@ pub struct Avm2<'gc> {
 impl<'gc> Avm2<'gc> {
     /// Construct a new AVM interpreter.
     pub fn new(
-        context: &mut GcContext<'_, 'gc>,
+        context: &mut StringContext<'gc>,
         player_version: u8,
         player_runtime: PlayerRuntime,
     ) -> Self {
-        let playerglobals_domain = Domain::uninitialized_domain(context.gc_context, None);
-        let stage_domain =
-            Domain::uninitialized_domain(context.gc_context, Some(playerglobals_domain));
+        let mc = context.gc();
 
-        let public_namespaces = (0..=(ApiVersion::VM_INTERNAL as usize))
-            .map(|val| Namespace::package("", ApiVersion::from_usize(val).unwrap(), context))
-            .collect();
+        let playerglobals_domain = Domain::uninitialized_domain(mc, None);
+        let stage_domain = Domain::uninitialized_domain(mc, Some(playerglobals_domain));
+
+        let namespaces = CommonNamespaces::new(context);
+        let multinames = CommonMultinames::new(context, &namespaces);
 
         Self {
             player_version,
             player_runtime,
-            stack: Vec::new(),
+            stack: Vec::with_capacity(PREALLOCATED_STACK_SIZE),
             scope_stack: Vec::new(),
-            call_stack: GcRefLock::new(context.gc_context, CallStack::new().into()),
+            call_stack: GcRefLock::new(mc, CallStack::new().into()),
             playerglobals_domain,
             stage_domain,
             system_classes: None,
+            system_class_defs: None,
             toplevel_global_object: None,
 
-            public_namespace_base_version: Namespace::package("", ApiVersion::AllVersions, context),
-            public_namespaces,
-            public_namespace_vm_internal: Namespace::package("", ApiVersion::VM_INTERNAL, context),
-            internal_namespace: Namespace::internal("", context),
-            as3_namespace: Namespace::package(
-                "http://adobe.com/AS3/2006/builtin",
-                ApiVersion::AllVersions,
-                context,
-            ),
-            vector_public_namespace: Namespace::package(
-                "__AS3__.vec",
-                ApiVersion::AllVersions,
-                context,
-            ),
-            vector_internal_namespace: Namespace::internal("__AS3__.vec", context),
-            proxy_namespace: Namespace::package(
-                "http://www.adobe.com/2006/actionscript/flash/proxy",
-                ApiVersion::AllVersions,
-                context,
-            ),
-            // these are required to facilitate shared access between Rust and AS
-            flash_display_internal: Namespace::internal("flash.display", context),
-            flash_utils_internal: Namespace::internal("flash.utils", context),
-            flash_geom_internal: Namespace::internal("flash.geom", context),
-            flash_events_internal: Namespace::internal("flash.events", context),
-            flash_text_engine_internal: Namespace::internal("flash.text.engine", context),
-            flash_net_internal: Namespace::internal("flash.net", context),
+            namespaces: Gc::new(mc, namespaces),
+            multinames: Gc::new(mc, multinames),
 
             native_method_table: Default::default(),
             native_instance_allocator_table: Default::default(),
-            native_instance_init_table: Default::default(),
+            native_super_initializer_table: Default::default(),
             native_call_handler_table: Default::default(),
             broadcast_list: Default::default(),
 
@@ -287,6 +254,13 @@ impl<'gc> Avm2<'gc> {
     /// This function panics if the interpreter has not yet been initialized.
     pub fn classes(&self) -> &SystemClasses<'gc> {
         self.system_classes.as_ref().unwrap()
+    }
+
+    /// Return the current set of system class definitions.
+    ///
+    /// This function panics if the interpreter has not yet been initialized.
+    pub fn class_defs(&self) -> &SystemClassDefs<'gc> {
+        self.system_class_defs.as_ref().unwrap()
     }
 
     pub fn toplevel_global_object(&self) -> Option<Object<'gc>> {
@@ -627,8 +601,7 @@ impl<'gc> Avm2<'gc> {
         activation.set_outer(ScopeChain::new(domain));
 
         let num_scripts = abc.scripts.len();
-        let tunit =
-            TranslationUnit::from_abc(abc, domain, name, movie, activation.context.gc_context);
+        let tunit = TranslationUnit::from_abc(abc, domain, name, movie, activation.gc());
         tunit.load_classes(&mut activation)?;
         for i in 0..num_scripts {
             tunit.load_script(i as u32, &mut activation)?;
@@ -638,6 +611,44 @@ impl<'gc> Avm2<'gc> {
             return Ok(Some(tunit.get_script(num_scripts - 1).unwrap()));
         }
         Ok(None)
+    }
+
+    /// Load the playerglobal ABC file.
+    pub fn load_builtin_abc(
+        context: &mut UpdateContext<'gc>,
+        data: &[u8],
+        domain: Domain<'gc>,
+        movie: Arc<SwfMovie>,
+    ) {
+        let mut reader = Reader::new(data);
+        let abc = match reader.read() {
+            Ok(abc) => abc,
+            Err(_) => panic!("Builtin ABC should be valid"),
+        };
+
+        let mut activation = Activation::from_domain(context, domain);
+        // Make sure we have the correct domain for code that tries to access it
+        // using `activation.domain()`
+        activation.set_outer(ScopeChain::new(domain));
+
+        let tunit = TranslationUnit::from_abc(abc, domain, None, movie, activation.gc());
+        tunit
+            .load_classes(&mut activation)
+            .expect("Classes should load");
+
+        // The second script (script #1) is Toplevel.as, and includes important
+        // builtin classes such as Namespace, QName, and XML.
+        tunit
+            .load_script(1, &mut activation)
+            .expect("Script should load");
+        init_builtin_system_classes(&mut activation);
+
+        // The first script (script #0) is globals.as, and includes other builtin
+        // classes that are less critical for the AVM to load.
+        tunit
+            .load_script(0, &mut activation)
+            .expect("Script should load");
+        init_native_system_classes(&mut activation);
     }
 
     pub fn stage_domain(&self) -> Domain<'gc> {
@@ -663,19 +674,25 @@ impl<'gc> Avm2<'gc> {
         self.call_stack
     }
 
-    #[cold]
-    fn stack_overflow(&self) {
-        tracing::warn!("Avm2::push: Stack overflow");
+    // See: https://doc.rust-lang.org/std/vec/struct.Vec.html#method.push_within_capacity
+    #[inline(always)]
+    fn push_internal(&mut self, value: Value<'gc>) {
+        let stack = &mut self.stack;
+
+        if stack.len() == stack.capacity() {
+            panic!("Native stack underflow");
+        }
+
+        unsafe {
+            let end = stack.as_mut_ptr().add(stack.len());
+            std::ptr::write(end, value);
+            stack.set_len(stack.len() + 1);
+        }
     }
 
     /// Push a value onto the operand stack.
     #[inline(always)]
-    fn push(&mut self, value: impl Into<Value<'gc>>, depth: usize, max: usize) {
-        if self.stack.len() - depth > max {
-            self.stack_overflow();
-            return;
-        }
-        let mut value = value.into();
+    fn push(&mut self, mut value: Value<'gc>) {
         if let Value::Object(o) = value {
             // this is hot, so let's avoid a non-inlined call here
             if let Object::PrimitiveObject(_) = o {
@@ -686,34 +703,23 @@ impl<'gc> Avm2<'gc> {
         }
 
         avm_debug!(self, "Stack push {}: {value:?}", self.stack.len());
-        self.stack.push(value);
+
+        self.push_internal(value);
     }
 
     /// Push a value onto the operand stack.
-    /// This is like `push`, but does not handle `PrimitiveObject`
-    /// and does not check for stack overflows.
+    /// This is like `push`, but does not handle `PrimitiveObject`.
     #[inline(always)]
-    fn push_raw(&mut self, value: impl Into<Value<'gc>>) {
-        let value = value.into();
+    fn push_raw(&mut self, value: Value<'gc>) {
         avm_debug!(self, "Stack push {}: {value:?}", self.stack.len());
-        self.stack.push(value);
+
+        self.push_internal(value);
     }
 
     /// Retrieve the top-most value on the operand stack.
-    #[allow(clippy::let_and_return)]
     #[inline(always)]
-    fn pop(&mut self, depth: usize) -> Value<'gc> {
-        #[cold]
-        fn stack_underflow() {
-            tracing::warn!("Avm2::pop: Stack underflow");
-        }
-
-        let value = if self.stack.len() <= depth {
-            stack_underflow();
-            Value::Undefined
-        } else {
-            self.stack.pop().unwrap_or(Value::Undefined)
-        };
+    fn pop(&mut self) -> Value<'gc> {
+        let value = self.stack.pop().expect("Native stack underflow");
 
         avm_debug!(self, "Stack pop {}: {value:?}", self.stack.len());
 
@@ -721,51 +727,32 @@ impl<'gc> Avm2<'gc> {
     }
 
     /// Peek the n-th value from the end of the operand stack.
-    #[allow(clippy::let_and_return)]
     #[inline(always)]
     fn peek(&mut self, index: usize) -> Value<'gc> {
-        #[cold]
-        fn stack_underflow() {
-            tracing::warn!("Avm2::peek: Stack underflow");
-        }
-
-        let value = self
-            .stack
-            .get(self.stack.len() - index - 1)
-            .copied()
-            .unwrap_or_else(|| {
-                stack_underflow();
-                Value::Undefined
-            });
+        let value = self.stack[self.stack.len() - index - 1];
 
         avm_debug!(self, "Stack peek {}: {value:?}", self.stack.len());
 
         value
     }
 
-    fn pop_args(&mut self, arg_count: u32, depth: usize) -> Vec<Value<'gc>> {
+    fn pop_args(&mut self, arg_count: u32) -> Vec<Value<'gc>> {
         let mut args = vec![Value::Undefined; arg_count as usize];
         for arg in args.iter_mut().rev() {
-            *arg = self.pop(depth);
+            *arg = self.pop();
         }
         args
     }
 
-    fn push_scope(&mut self, scope: Scope<'gc>, depth: usize, max: usize) {
-        if self.scope_stack.len() - depth > max {
-            tracing::warn!("Avm2::push_scope: Scope stack overflow");
-            return;
-        }
+    fn truncate_stack(&mut self, size: usize) {
+        self.stack.truncate(size);
+    }
 
+    fn push_scope(&mut self, scope: Scope<'gc>) {
         self.scope_stack.push(scope);
     }
 
-    fn pop_scope(&mut self, depth: usize) {
-        if self.scope_stack.len() <= depth {
-            tracing::warn!("Avm2::pop_scope: Scope stack underflow");
-            return;
-        }
-
+    fn pop_scope(&mut self) {
         self.scope_stack.pop();
     }
 
@@ -792,7 +779,7 @@ impl<'gc> Avm2<'gc> {
     /// See `AvmCore::findPublicNamespace()`
     /// https://github.com/adobe/avmplus/blob/858d034a3bd3a54d9b70909386435cf4aec81d21/core/AvmCore.cpp#L5809C25-L5809C25
     pub fn find_public_namespace(&self) -> Namespace<'gc> {
-        self.public_namespaces[self.root_api_version as usize]
+        self.namespaces.public_for(self.root_api_version)
     }
 
     pub fn optimizer_enabled(&self) -> bool {

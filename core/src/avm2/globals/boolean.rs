@@ -30,7 +30,7 @@ fn instance_init<'gc>(
 }
 
 /// Implements `Boolean`'s native instance initializer.
-fn native_instance_init<'gc>(
+fn super_init<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
@@ -133,25 +133,23 @@ fn value_of<'gc>(
 
 /// Construct `Boolean`'s class.
 pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
-    let mc = activation.context.gc_context;
+    let mc = activation.gc();
+    let namespaces = activation.avm2().namespaces;
+
     let class = Class::new(
-        QName::new(activation.avm2().public_namespace_base_version, "Boolean"),
-        Some(activation.avm2().classes().object.inner_class_definition()),
+        QName::new(namespaces.public_all(), "Boolean"),
+        Some(activation.avm2().class_defs().object),
         Method::from_builtin(instance_init, "<Boolean instance initializer>", mc),
         Method::from_builtin(class_init, "<Boolean class initializer>", mc),
-        activation.avm2().classes().class.inner_class_definition(),
+        activation.avm2().class_defs().class,
         mc,
     );
 
     class.set_attributes(mc, ClassAttributes::FINAL | ClassAttributes::SEALED);
     class.set_instance_allocator(mc, primitive_allocator);
-    class.set_native_instance_init(
+    class.set_super_init(
         mc,
-        Method::from_builtin(
-            native_instance_init,
-            "<Boolean native instance initializer>",
-            mc,
-        ),
+        Method::from_builtin(super_init, "<Boolean native instance initializer>", mc),
     );
     class.set_call_handler(
         mc,
@@ -160,18 +158,10 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
 
     const AS3_INSTANCE_METHODS: &[(&str, NativeMethodImpl)] =
         &[("toString", to_string), ("valueOf", value_of)];
-    class.define_builtin_instance_methods(
-        mc,
-        activation.avm2().as3_namespace,
-        AS3_INSTANCE_METHODS,
-    );
+    class.define_builtin_instance_methods(mc, namespaces.as3, AS3_INSTANCE_METHODS);
 
     const CONSTANTS_INT: &[(&str, i32)] = &[("length", 1)];
-    class.define_constant_int_class_traits(
-        activation.avm2().public_namespace_base_version,
-        CONSTANTS_INT,
-        activation,
-    );
+    class.define_constant_int_class_traits(namespaces.public_all(), CONSTANTS_INT, activation);
 
     class.mark_traits_loaded(activation.context.gc_context);
     class

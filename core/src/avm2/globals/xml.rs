@@ -143,7 +143,7 @@ pub fn set_name<'gc>(
 
     let name = match args.get_value(0) {
         // 2. If (Type(name) is Object) and (name.[[Class]] == "QName") and (name.uri == null)
-        Value::Object(Object::QNameObject(qname)) if qname.uri().is_none() => {
+        Value::Object(Object::QNameObject(qname)) if qname.is_any_namespace() => {
             // a. Let name = name.localName
             qname.local_name().into()
         }
@@ -171,7 +171,7 @@ pub fn set_name<'gc>(
         None
     } else {
         new_name
-            .uri()
+            .uri(activation.strings())
             .filter(|uri| !uri.is_empty())
             .map(E4XNamespace::new_uri)
     };
@@ -272,7 +272,7 @@ pub fn add_namespace<'gc>(
         activation.gc(),
         E4XNamespace {
             prefix: ns.prefix(),
-            uri: ns.namespace().as_uri(),
+            uri: ns.namespace().as_uri(activation.strings()),
         },
     );
 
@@ -311,7 +311,7 @@ pub fn set_namespace<'gc>(
         .unwrap();
     let ns = E4XNamespace {
         prefix: ns.prefix(),
-        uri: ns.namespace().as_uri(),
+        uri: ns.namespace().as_uri(activation.strings()),
     };
 
     // 3. Let x.[[Name]] be a new QName created as if by calling the constructor new QName(ns2, x.[[Name]])
@@ -360,7 +360,7 @@ pub fn remove_namespace<'gc>(
         .unwrap();
     let ns = E4XNamespace {
         prefix: ns.prefix(),
-        uri: ns.namespace().as_uri(),
+        uri: ns.namespace().as_uri(activation.strings()),
     };
 
     // 3. Let thisNS be the result of calling [[GetNamespace]] on x.[[Name]] with argument x.[[InScopeNamespaces]]
@@ -576,7 +576,7 @@ pub fn children<'gc>(
         activation,
         children,
         Some(xml.into()),
-        Some(Multiname::any(activation.gc())),
+        Some(Multiname::any()),
     )
     .into())
 }
@@ -646,7 +646,7 @@ pub fn attributes<'gc>(
         activation,
         attributes,
         Some(xml.into()),
-        Some(Multiname::any_attribute(activation.gc())),
+        Some(Multiname::any_attribute()),
     )
     .into())
 }
@@ -728,12 +728,14 @@ pub fn append_child<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let namespaces = activation.avm2().namespaces;
+
     let xml = this.as_xml_object().unwrap();
     let child = args.get_value(0);
     let child = crate::avm2::e4x::maybe_escape_child(activation, child)?;
 
     // 1. Let children be the result of calling the [[Get]] method of x with argument "*"
-    let name = Multiname::any(activation.gc());
+    let name = Multiname::any();
     let children = xml.get_property_local(&name, activation)?;
 
     // 2. Call the [[Put]] method of children with arguments children.[[Length]] and child
@@ -743,7 +745,7 @@ pub fn append_child<'gc>(
         .expect("Should have an XMLList");
     let length = xml_list.length();
     let name = Multiname::new(
-        activation.avm2().public_namespace_base_version,
+        namespaces.public_all(),
         AvmString::new_utf8(activation.context.gc_context, length.to_string()),
     );
     xml_list.set_property_local(&name, child, activation)?;
@@ -1102,7 +1104,7 @@ pub fn set_children<'gc>(
     let value = args.get_value(0);
 
     // 1. Call the [[Put]] method of x with arguments "*" and value
-    xml.set_property_local(&Multiname::any(activation.gc()), value, activation)?;
+    xml.set_property_local(&Multiname::any(), value, activation)?;
 
     // 2. Return x
     Ok(xml.into())

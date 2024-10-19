@@ -20,8 +20,8 @@ use crate::avm2::value::Value;
 use crate::avm2::Multiname;
 use crate::avm2::Namespace;
 use crate::avm2::{Avm2, Error};
-use crate::context::{GcContext, UpdateContext};
-use crate::string::{AvmAtom, AvmString};
+use crate::context::UpdateContext;
+use crate::string::{AvmAtom, AvmString, StringContext};
 use crate::tag_utils::SwfMovie;
 use gc_arena::Gc;
 use smallvec::SmallVec;
@@ -36,10 +36,9 @@ use super::error::make_mismatch_error;
 /// Represents a particular register set.
 ///
 /// This type exists primarily because SmallVec isn't garbage-collectable.
-
 pub struct RegisterSet<'gc>(SmallVec<[Value<'gc>; 8]>);
 
-unsafe impl<'gc> gc_arena::Collect for RegisterSet<'gc> {
+unsafe impl gc_arena::Collect for RegisterSet<'_> {
     #[inline]
     fn trace(&self, cc: &gc_arena::Collection) {
         for register in &self.0 {
@@ -135,12 +134,6 @@ pub struct Activation<'a, 'gc: 'a> {
     /// The index where the scope frame starts.
     scope_depth: usize,
 
-    /// Maximum size for the stack frame.
-    max_stack_size: usize,
-
-    /// Maximum size for the scope frame.
-    max_scope_size: usize,
-
     pub context: &'a mut UpdateContext<'gc>,
 }
 
@@ -150,6 +143,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     #[inline(always)]
     pub fn gc(&self) -> &'gc gc_arena::Mutation<'gc> {
         self.context.gc_context
+    }
+
+    #[inline(always)]
+    pub fn strings(&mut self) -> &mut StringContext<'gc> {
+        &mut self.context.strings
     }
 
     /// Construct an activation that does not represent any particular scope.
@@ -175,8 +173,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             activation_class: None,
             stack_depth: context.avm2.stack.len(),
             scope_depth: context.avm2.scope_stack.len(),
-            max_stack_size: 0,
-            max_scope_size: 0,
             context,
         }
     }
@@ -205,8 +201,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             activation_class: None,
             stack_depth: context.avm2.stack.len(),
             scope_depth: context.avm2.scope_stack.len(),
-            max_stack_size: 0,
-            max_scope_size: 0,
             context,
         }
     }
@@ -219,17 +213,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     ) -> Result<Self, Error<'gc>> {
         let (method, global_object, domain) = script.init();
 
-        let (num_locals, max_stack, max_scope) = match method {
-            Method::Native { .. } => (0, 0, 0),
+        let num_locals = match method {
+            Method::Native { .. } => 0,
             Method::Bytecode(bytecode) => {
                 let body = bytecode
                     .body()
                     .ok_or("Cannot execute non-native method (for script) without body")?;
-                (
-                    body.num_locals,
-                    body.max_stack,
-                    body.max_scope_depth - body.init_scope_depth,
-                )
+
+                body.num_locals
             }
         };
         let mut local_registers = RegisterSet::new(num_locals + 1);
@@ -271,14 +262,12 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             activation_class,
             stack_depth: context.avm2.stack.len(),
             scope_depth: context.avm2.scope_stack.len(),
-            max_stack_size: max_stack as usize,
-            max_scope_size: max_scope as usize,
             context,
         };
 
         // Run verifier for bytecode methods
         if let Method::Bytecode(method) = method {
-            if method.verified_info.read().is_none() {
+            if method.verified_info.borrow().is_none() {
                 BytecodeMethod::verify(method, &mut created_activation)?;
             }
         }
@@ -445,15 +434,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         self.activation_class = activation_class;
         self.stack_depth = self.context.avm2.stack.len();
         self.scope_depth = self.context.avm2.scope_stack.len();
-        self.max_stack_size = body.max_stack as usize;
-        self.max_scope_size = (body.max_scope_depth - body.init_scope_depth) as usize;
 
         // Everything is now setup for the verifier to run
-        if method.verified_info.read().is_none() {
+        if method.verified_info.borrow().is_none() {
             BytecodeMethod::verify(method, self)?;
         }
 
-        let verified_info = method.verified_info.read();
+        let verified_info = method.verified_info.borrow();
         let signature = &verified_info.as_ref().unwrap().param_config;
 
         if user_arguments.len() > signature.len() && !has_rest_or_args {
@@ -551,8 +538,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             activation_class: None,
             stack_depth: context.avm2.stack.len(),
             scope_depth: context.avm2.scope_stack.len(),
-            max_stack_size: 0,
-            max_scope_size: 0,
             context,
         }
     }
@@ -567,7 +552,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             .bound_superclass_object
             .expect("Superclass object is required to run super_init");
 
-        bound_superclass_object.call_native_init(receiver.into(), args, self)
+        bound_superclass_object.call_super_init(receiver.into(), args, self)
     }
 
     /// Retrieve a local register.
@@ -637,11 +622,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         self.context.avm2
     }
 
-    #[inline]
-    pub fn borrow_gc(&mut self) -> GcContext<'_, 'gc> {
-        self.context.borrow_gc()
-    }
-
     pub fn scope_frame(&self) -> &[Scope<'gc>] {
         &self.context.avm2.scope_stack[self.scope_depth..]
     }
@@ -649,60 +629,53 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// Pushes a value onto the operand stack.
     #[inline]
     pub fn push_stack(&mut self, value: impl Into<Value<'gc>>) {
-        let stack_depth = self.stack_depth;
-        let max_stack_size = self.max_stack_size;
-        self.avm2().push(value.into(), stack_depth, max_stack_size)
+        self.avm2().push(value.into());
     }
 
     /// Pushes a value onto the operand stack, without running some checks.
     #[inline]
     pub fn push_raw(&mut self, value: impl Into<Value<'gc>>) {
-        self.avm2().push_raw(value)
+        self.avm2().push_raw(value.into());
     }
 
     /// Pops a value off the operand stack.
     #[inline]
     #[must_use]
     pub fn pop_stack(&mut self) -> Value<'gc> {
-        let stack_depth = self.stack_depth;
-        self.avm2().pop(stack_depth)
+        self.avm2().pop()
     }
 
     /// Pops multiple values off the operand stack.
     #[inline]
     #[must_use]
     pub fn pop_stack_args(&mut self, arg_count: u32) -> Vec<Value<'gc>> {
-        let stack_depth = self.stack_depth;
-        self.avm2().pop_args(arg_count, stack_depth)
+        self.avm2().pop_args(arg_count)
     }
 
     /// Pushes a scope onto the scope stack.
     #[inline]
     pub fn push_scope(&mut self, scope: Scope<'gc>) {
-        let scope_depth = self.scope_depth;
-        let max_scope_size = self.max_scope_size;
-        self.avm2().push_scope(scope, scope_depth, max_scope_size)
+        self.avm2().push_scope(scope);
     }
 
     /// Pops a scope off of the scope stack.
     #[inline]
     pub fn pop_scope(&mut self) {
-        let scope_depth = self.scope_depth;
-        self.avm2().pop_scope(scope_depth);
+        self.avm2().pop_scope();
     }
 
     /// Clears the operand stack used by this activation.
     #[inline]
     pub fn clear_stack(&mut self) {
         let stack_depth = self.stack_depth;
-        self.avm2().stack.truncate(stack_depth)
+        self.avm2().truncate_stack(stack_depth);
     }
 
     /// Clears the scope stack used by this activation.
     #[inline]
     pub fn clear_scope(&mut self) {
         let scope_depth = self.scope_depth;
-        self.avm2().scope_stack.truncate(scope_depth)
+        self.avm2().scope_stack.truncate(scope_depth);
     }
 
     /// Get the superclass of the class that defined the currently-executing
@@ -732,9 +705,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         index: Index<AbcNamespace>,
     ) -> Result<Namespace<'gc>, Error<'gc>> {
-        method
-            .translation_unit()
-            .pool_namespace(index, self.context)
+        method.translation_unit().pool_namespace(self, index)
     }
 
     /// Retrieve a method entry from the current ABC file's method table.
@@ -755,7 +726,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     ) -> Result<Value<'gc>, Error<'gc>> {
         // The method must be verified at this point
 
-        let verified_info = method.verified_info.read();
+        let verified_info = method.verified_info.borrow();
         let verified_code = verified_info.as_ref().unwrap().parsed_code.as_slice();
 
         self.ip = 0;
@@ -786,7 +757,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             Error::RustError(_) => return Err(error),
         };
 
-        let verified_info = method.verified_info.read();
+        let verified_info = method.verified_info.borrow();
         let exception_list = &verified_info.as_ref().unwrap().exceptions;
 
         // Use `coerce_to_object` so that we handle primitives correctly.
@@ -1125,14 +1096,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     fn op_dup(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        self.push_stack(
-            self.context
-                .avm2
-                .stack
-                .last()
-                .cloned()
-                .unwrap_or(Value::Undefined),
-        );
+        let value = self.avm2().peek(0);
+        self.push_stack(value);
 
         Ok(FrameControl::Continue)
     }
@@ -1514,6 +1479,18 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         }
 
         // main path for dynamic names
+        if multiname.has_lazy_name() {
+            let name_value = self.context.avm2.peek(0);
+            if matches!(name_value, Value::Object(Object::XmlListObject(_))) {
+                // ECMA-357 11.3.1 The delete Operator
+                // If the type of the operand is XMLList, then a TypeError exception is thrown.
+                return Err(Error::AvmError(type_error(
+                    self,
+                    "Error #1119: Delete operator is not supported with operand of type XMLList.",
+                    1119,
+                )?));
+            }
+        }
         let multiname = multiname.fill_with_runtime_params(self)?;
         let object = self.pop_stack();
         let object = object.coerce_to_object_or_typeerror(self, Some(&multiname))?;
@@ -1586,7 +1563,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         method: Gc<'gc, BytecodeMethod<'gc>>,
         index: Index<Exception>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let verified_info = method.verified_info.read();
+        let verified_info = method.verified_info.borrow();
         let exception_list = &verified_info.as_ref().unwrap().exceptions;
 
         let ex = &exception_list[index.0 as usize];
@@ -1742,7 +1719,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
     fn op_get_slot(&mut self, index: u32) -> Result<FrameControl<'gc>, Error<'gc>> {
         let object = self.pop_stack().coerce_to_object_or_typeerror(self, None)?;
-        let value = object.get_slot(index)?;
+        let value = object.get_slot(index);
 
         self.push_stack(value);
 
@@ -1762,7 +1739,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let value = self.pop_stack();
         let object = self.pop_stack().coerce_to_object_or_typeerror(self, None)?;
 
-        object.set_slot_no_coerce(index, value, self.context.gc_context)?;
+        object.set_slot_no_coerce(index, value, self.context.gc_context);
 
         Ok(FrameControl::Continue)
     }
@@ -1771,7 +1748,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let value = self
             .global_scope()
             .map(|global| global.get_slot(index))
-            .transpose()?
             .unwrap_or(Value::Undefined);
 
         self.push_stack(value);
@@ -2015,8 +1991,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     fn op_check_filter(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-        let xml = self.avm2().classes().xml.inner_class_definition();
-        let xml_list = self.avm2().classes().xml_list.inner_class_definition();
+        let xml = self.avm2().class_defs().xml;
+        let xml_list = self.avm2().class_defs().xml_list;
         let value = self.pop_stack().coerce_to_object_or_typeerror(self, None)?;
 
         if value.is_of_type(xml) || value.is_of_type(xml_list) {
@@ -2737,11 +2713,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             Value::Bool(_) => "boolean",
             Value::Number(_) | Value::Integer(_) => "number",
             Value::Object(o) => {
-                let classes = self.avm2().classes();
+                let classes = self.avm2().class_defs();
 
                 match o {
                     Object::FunctionObject(_) => {
-                        if o.instance_class() == classes.function.inner_class_definition() {
+                        if o.instance_class() == classes.function {
                             "function"
                         } else {
                             // Subclasses always have a typeof = "object"
@@ -2749,8 +2725,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                         }
                     }
                     Object::XmlObject(_) | Object::XmlListObject(_) => {
-                        if o.instance_class() == classes.xml_list.inner_class_definition()
-                            || o.instance_class() == classes.xml.inner_class_definition()
+                        if o.instance_class() == classes.xml_list
+                            || o.instance_class() == classes.xml
                         {
                             "xml"
                         } else {

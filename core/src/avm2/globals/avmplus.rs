@@ -5,9 +5,12 @@ use crate::avm2::method::Method;
 use crate::avm2::object::{ArrayObject, TObject};
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::property::Property;
-
 use crate::avm2::{Activation, Error, Multiname, Namespace, Object, Value};
+use crate::string::{AvmString, StringContext};
+
 use crate::avm2_stub_method;
+
+use gc_arena::Gc;
 
 // Implements `avmplus.describeTypeJSON`
 pub fn describe_type_json<'gc>(
@@ -183,6 +186,8 @@ fn describe_internal_body<'gc>(
     class_def: Class<'gc>,
     flags: DescribeTypeFlags,
 ) -> Result<Object<'gc>, Error<'gc>> {
+    let mc = activation.gc();
+
     let traits = activation
         .avm2()
         .classes()
@@ -225,30 +230,18 @@ fn describe_internal_body<'gc>(
         traits.set_public_property("methods", Value::Null, activation)?;
     }
 
-    let mut bases_array = bases
-        .as_array_storage_mut(activation.context.gc_context)
-        .unwrap();
-    let mut interfaces_array = interfaces
-        .as_array_storage_mut(activation.context.gc_context)
-        .unwrap();
-    let mut variables_array = variables
-        .as_array_storage_mut(activation.context.gc_context)
-        .unwrap();
-    let mut accessors_array = accessors
-        .as_array_storage_mut(activation.context.gc_context)
-        .unwrap();
-    let mut methods_array = methods
-        .as_array_storage_mut(activation.context.gc_context)
-        .unwrap();
+    let mut bases_array = bases.as_array_storage_mut(mc).unwrap();
+    let mut interfaces_array = interfaces.as_array_storage_mut(mc).unwrap();
+    let mut variables_array = variables.as_array_storage_mut(mc).unwrap();
+    let mut accessors_array = accessors.as_array_storage_mut(mc).unwrap();
+    let mut methods_array = methods.as_array_storage_mut(mc).unwrap();
 
     let superclass = class_def.super_class();
 
     if flags.contains(DescribeTypeFlags::INCLUDE_BASES) {
         let mut current_super_class = superclass;
         while let Some(super_class) = current_super_class {
-            let super_name = super_class
-                .name()
-                .to_qualified_name(activation.context.gc_context);
+            let super_name = super_class.name().to_qualified_name(mc);
             bases_array.push(super_name.into());
             current_super_class = super_class.super_class();
         }
@@ -259,9 +252,7 @@ fn describe_internal_body<'gc>(
 
     if flags.contains(DescribeTypeFlags::INCLUDE_INTERFACES) {
         for interface in &*class_def.all_interfaces() {
-            let interface_name = interface
-                .name()
-                .to_qualified_name(activation.context.gc_context);
+            let interface_name = interface.name().to_qualified_name(mc);
             interfaces_array.push(interface_name.into());
         }
     }
@@ -271,7 +262,7 @@ fn describe_internal_body<'gc>(
     let mut skip_ns: Vec<Namespace<'_>> = Vec::new();
     if let Some(super_vtable) = super_vtable {
         for (_, ns, prop) in super_vtable.resolved_traits().iter() {
-            if !ns.as_uri().is_empty() {
+            if !ns.as_uri(activation.strings()).is_empty() {
                 if let Property::Method { .. } = prop {
                     if !skip_ns
                         .iter()
@@ -303,20 +294,14 @@ fn describe_internal_body<'gc>(
             continue;
         }
 
-        let uri = if ns.as_uri().is_empty() {
-            None
-        } else {
-            Some(ns.as_uri())
-        };
+        let uri = ns.as_uri_opt().filter(|uri| !uri.is_empty());
 
         match prop {
             Property::ConstSlot { slot_id } | Property::Slot { slot_id } => {
                 if !flags.contains(DescribeTypeFlags::INCLUDE_VARIABLES) {
                     continue;
                 }
-                let prop_class_name = vtable
-                    .slot_class_name(*slot_id, activation.context.gc_context)?
-                    .to_qualified_name_or_star(activation.context.gc_context);
+                let prop_class_name = vtable.slot_class_name(activation.strings(), *slot_id)?;
 
                 let access = match prop {
                     Property::ConstSlot { .. } => "readonly",
@@ -370,21 +355,17 @@ fn describe_internal_body<'gc>(
                     continue;
                 }
 
-                let return_type_name = method
-                    .method
-                    .return_type()
-                    .to_qualified_name_or_star(activation.context.gc_context);
+                let return_type_name =
+                    display_name(activation.strings(), method.method.return_type());
                 let declared_by = method.class;
 
                 if flags.contains(DescribeTypeFlags::HIDE_OBJECT)
-                    && declared_by == activation.avm2().classes().object.inner_class_definition()
+                    && declared_by == activation.avm2().class_defs().object
                 {
                     continue;
                 }
 
-                let declared_by_name = declared_by
-                    .dollar_removed_name(activation.context.gc_context)
-                    .to_qualified_name(activation.context.gc_context);
+                let declared_by_name = declared_by.dollar_removed_name(mc).to_qualified_name(mc);
 
                 let trait_metadata = vtable.get_metadata_for_disp(disp_id);
 
@@ -452,10 +433,7 @@ fn describe_internal_body<'gc>(
                     let setter = vtable
                         .get_full_method(*set)
                         .unwrap_or_else(|| panic!("Missing 'set' method for id {set:?}"));
-                    (
-                        setter.method.signature()[0].param_type_name.clone(),
-                        setter.class,
-                    )
+                    (setter.method.signature()[0].param_type_name, setter.class)
                 } else {
                     unreachable!();
                 };
@@ -469,17 +447,9 @@ fn describe_internal_body<'gc>(
                     continue;
                 }
 
-                let uri = if ns.as_uri().is_empty() {
-                    None
-                } else {
-                    Some(ns.as_uri())
-                };
-
-                let accessor_type =
-                    method_type.to_qualified_name_or_star(activation.context.gc_context);
-                let declared_by = defining_class
-                    .dollar_removed_name(activation.context.gc_context)
-                    .to_qualified_name(activation.context.gc_context);
+                let uri = ns.as_uri_opt().filter(|uri| !uri.is_empty());
+                let accessor_type = display_name(activation.strings(), method_type);
+                let declared_by = defining_class.dollar_removed_name(mc).to_qualified_name(mc);
 
                 let accessor_obj = activation
                     .avm2()
@@ -555,6 +525,17 @@ fn describe_internal_body<'gc>(
     Ok(traits)
 }
 
+fn display_name<'gc>(
+    context: &mut StringContext<'gc>,
+    name: Option<Gc<'gc, Multiname<'gc>>>,
+) -> AvmString<'gc> {
+    if let Some(name) = name {
+        name.to_qualified_name_or_star(context)
+    } else {
+        context.ascii_char(b'*')
+    }
+}
+
 fn write_params<'gc>(
     method: &Method<'gc>,
     activation: &mut Activation<'_, 'gc>,
@@ -564,9 +545,7 @@ fn write_params<'gc>(
         .as_array_storage_mut(activation.context.gc_context)
         .unwrap();
     for param in method.signature() {
-        let param_type_name = param
-            .param_type_name
-            .to_qualified_name_or_star(activation.context.gc_context);
+        let param_type_name = display_name(activation.strings(), param.param_type_name);
         let optional = param.default_value.is_some();
         let param_obj = activation
             .avm2()

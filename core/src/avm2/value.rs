@@ -10,7 +10,7 @@ use crate::avm2::Multiname;
 use crate::avm2::Namespace;
 use crate::ecma_conversions::{f64_to_wrapping_i32, f64_to_wrapping_u32};
 use crate::string::{AvmAtom, AvmString, WStr};
-use gc_arena::{Collect, Mutation};
+use gc_arena::Collect;
 use num_bigint::BigInt;
 use num_traits::{ToPrimitive, Zero};
 use std::mem::size_of;
@@ -67,13 +67,13 @@ impl<'gc> From<AvmAtom<'gc>> for Value<'gc> {
     }
 }
 
-impl<'gc> From<&'static str> for Value<'gc> {
+impl From<&'static str> for Value<'_> {
     fn from(string: &'static str) -> Self {
         Value::String(string.into())
     }
 }
 
-impl<'gc> From<bool> for Value<'gc> {
+impl From<bool> for Value<'_> {
     fn from(value: bool) -> Self {
         Value::Bool(value)
     }
@@ -88,43 +88,43 @@ where
     }
 }
 
-impl<'gc> From<f64> for Value<'gc> {
+impl From<f64> for Value<'_> {
     fn from(value: f64) -> Self {
         Value::Number(value)
     }
 }
 
-impl<'gc> From<f32> for Value<'gc> {
+impl From<f32> for Value<'_> {
     fn from(value: f32) -> Self {
         Value::Number(f64::from(value))
     }
 }
 
-impl<'gc> From<u8> for Value<'gc> {
+impl From<u8> for Value<'_> {
     fn from(value: u8) -> Self {
         Value::Integer(i32::from(value))
     }
 }
 
-impl<'gc> From<i8> for Value<'gc> {
+impl From<i8> for Value<'_> {
     fn from(value: i8) -> Self {
         Value::Integer(i32::from(value))
     }
 }
 
-impl<'gc> From<i16> for Value<'gc> {
+impl From<i16> for Value<'_> {
     fn from(value: i16) -> Self {
         Value::Integer(i32::from(value))
     }
 }
 
-impl<'gc> From<u16> for Value<'gc> {
+impl From<u16> for Value<'_> {
     fn from(value: u16) -> Self {
         Value::Integer(i32::from(value))
     }
 }
 
-impl<'gc> From<i32> for Value<'gc> {
+impl From<i32> for Value<'_> {
     fn from(value: i32) -> Self {
         if value >= (1 << 28) || value < -(1 << 28) {
             Value::Number(value as f64)
@@ -134,7 +134,7 @@ impl<'gc> From<i32> for Value<'gc> {
     }
 }
 
-impl<'gc> From<u32> for Value<'gc> {
+impl From<u32> for Value<'_> {
     fn from(value: u32) -> Self {
         if value >= (1 << 28) {
             Value::Number(value as f64)
@@ -144,7 +144,7 @@ impl<'gc> From<u32> for Value<'gc> {
     }
 }
 
-impl<'gc> From<usize> for Value<'gc> {
+impl From<usize> for Value<'_> {
     fn from(value: usize) -> Self {
         Value::Number(value as f64)
     }
@@ -521,7 +521,7 @@ pub fn abc_default_value<'gc>(
         AbcDefaultValue::Uint(u) => abc_uint(translation_unit, *u).map(|v| v.into()),
         AbcDefaultValue::Double(d) => abc_double(translation_unit, *d).map(|v| v.into()),
         AbcDefaultValue::String(s) => translation_unit
-            .pool_string(s.0, &mut activation.borrow_gc())
+            .pool_string(s.0, activation.strings())
             .map(Into::into),
         AbcDefaultValue::True => Ok(true.into()),
         AbcDefaultValue::False => Ok(false.into()),
@@ -534,7 +534,7 @@ pub fn abc_default_value<'gc>(
         | AbcDefaultValue::Explicit(ns)
         | AbcDefaultValue::StaticProtected(ns)
         | AbcDefaultValue::Private(ns) => {
-            let ns = translation_unit.pool_namespace(*ns, activation.context)?;
+            let ns = translation_unit.pool_namespace(activation, *ns)?;
             NamespaceObject::from_namespace(activation, ns).map(Into::into)
         }
     }
@@ -552,52 +552,31 @@ impl<'gc> Value<'gc> {
 
     /// Get the numerical portion of the value, if it exists.
     ///
-    /// This function performs no numerical coercion, nor are user-defined
-    /// object methods called. This should only be used if you specifically
-    /// need the behavior of only handling actual numbers; otherwise you should
-    /// use the appropriate `coerce_to_` method.
-    pub fn as_number(&self, mc: &Mutation<'gc>) -> Result<f64, Error<'gc>> {
+    /// This function performs no numerical coercion, nor are any methods called.
+    /// If the value is not numeric, this function will panic.
+    pub fn as_f64(&self) -> f64 {
         match self {
-            // Methods that look for numbers in Flash Player don't seem to care
-            // about user-defined `valueOf` implementations. This code upholds
-            // that limitation as long as `TObject`'s `value_of` method also
-            // does not call user-defined functions.
-            Value::Object(num) => match num.value_of(mc)? {
-                Value::Number(num) => Ok(num),
-                Value::Integer(num) => Ok(num as f64),
-                _ => Err(format!("Expected Number, int, or uint, found {self:?}").into()),
-            },
-            Value::Number(num) => Ok(*num),
-            Value::Integer(num) => Ok(*num as f64),
-            _ => Err(format!("Expected Number, int, or uint, found {self:?}").into()),
+            Value::Number(num) => *num,
+            Value::Integer(num) => *num as f64,
+            _ => panic!("Expected Number or Integer"),
         }
     }
 
     /// Like `as_number`, but for `i32`
-    pub fn as_integer(&self, mc: &Mutation<'gc>) -> Result<i32, Error<'gc>> {
+    pub fn as_i32(&self) -> i32 {
         match self {
-            Value::Object(num) => match num.value_of(mc)? {
-                Value::Number(num) => Ok(num as i32),
-                Value::Integer(num) => Ok(num),
-                _ => Err(format!("Expected Number, int, or uint, found {self:?}").into()),
-            },
-            Value::Number(num) => Ok(*num as i32),
-            Value::Integer(num) => Ok(*num),
-            _ => Err(format!("Expected Number, int, or uint, found {self:?}").into()),
+            Value::Number(num) => f64_to_wrapping_i32(*num),
+            Value::Integer(num) => *num,
+            _ => panic!("Expected Number or Integer"),
         }
     }
 
     /// Like `as_number`, but for `u32`
-    pub fn as_u32(&self, mc: &Mutation<'gc>) -> Result<u32, Error<'gc>> {
+    pub fn as_u32(&self) -> u32 {
         match self {
-            Value::Object(num) => match num.value_of(mc)? {
-                Value::Number(num) => Ok(num as u32),
-                Value::Integer(num) => Ok(num as u32),
-                _ => Err(format!("Expected Number, int, or uint, found {self:?}").into()),
-            },
-            Value::Number(num) => Ok(*num as u32),
-            Value::Integer(num) => Ok(*num as u32),
-            _ => Err(format!("Expected Number, int, or uint, found {self:?}").into()),
+            Value::Number(num) => f64_to_wrapping_u32(*num),
+            Value::Integer(num) => *num as u32,
+            _ => panic!("Expected Number or Integer"),
         }
     }
 
@@ -654,7 +633,7 @@ impl<'gc> Value<'gc> {
         });
 
         match self {
-            Value::Object(Object::PrimitiveObject(o)) => o.value_of(activation.context.gc_context),
+            Value::Object(Object::PrimitiveObject(o)) => o.value_of(activation.strings()),
             Value::Object(o) if hint == Hint::String => {
                 let object = *o;
 
@@ -839,10 +818,7 @@ impl<'gc> Value<'gc> {
             }
             Value::Integer(i) => {
                 if *i >= 0 && *i < 10 {
-                    activation
-                        .context
-                        .interner
-                        .get_char(activation.context.gc_context, '0' as u16 + *i as u16)
+                    activation.strings().make_char('0' as u16 + *i as u16)
                 } else {
                     AvmString::new_utf8(activation.context.gc_context, i.to_string())
                 }
@@ -990,30 +966,30 @@ impl<'gc> Value<'gc> {
         activation: &mut Activation<'_, 'gc>,
         class: Class<'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
-        if class == activation.avm2().classes().int.inner_class_definition() {
+        if class == activation.avm2().class_defs().int {
             return Ok(self.coerce_to_i32(activation)?.into());
         }
 
-        if class == activation.avm2().classes().uint.inner_class_definition() {
+        if class == activation.avm2().class_defs().uint {
             return Ok(self.coerce_to_u32(activation)?.into());
         }
 
-        if class == activation.avm2().classes().number.inner_class_definition() {
+        if class == activation.avm2().class_defs().number {
             return Ok(self.coerce_to_number(activation)?.into());
         }
 
-        if class == activation.avm2().classes().boolean.inner_class_definition() {
+        if class == activation.avm2().class_defs().boolean {
             return Ok(self.coerce_to_boolean().into());
         }
 
         if matches!(self, Value::Undefined) || matches!(self, Value::Null) {
-            if class == activation.avm2().classes().void_def {
+            if class == activation.avm2().class_defs().void {
                 return Ok(Value::Undefined);
             }
             return Ok(Value::Null);
         }
 
-        if class == activation.avm2().classes().string.inner_class_definition() {
+        if class == activation.avm2().class_defs().string {
             return Ok(self.coerce_to_string(activation)?.into());
         }
 
@@ -1093,18 +1069,18 @@ impl<'gc> Value<'gc> {
         activation: &mut Activation<'_, 'gc>,
         type_object: Class<'gc>,
     ) -> bool {
-        if type_object == activation.avm2().classes().number.inner_class_definition() {
+        if type_object == activation.avm2().class_defs().number {
             return self.is_number();
         }
-        if type_object == activation.avm2().classes().uint.inner_class_definition() {
+        if type_object == activation.avm2().class_defs().uint {
             return self.is_u32();
         }
-        if type_object == activation.avm2().classes().int.inner_class_definition() {
+        if type_object == activation.avm2().class_defs().int {
             return self.is_i32();
         }
 
         if let Value::Undefined = self {
-            if type_object == activation.avm2().classes().void_def {
+            if type_object == activation.avm2().class_defs().void {
                 return true;
             }
         }
@@ -1156,14 +1132,16 @@ impl<'gc> Value<'gc> {
 
             if let Some(self_qname) = obj.as_qname_object() {
                 if let Value::Object(Object::QNameObject(other_qname)) = other {
-                    return Ok(self_qname.uri() == other_qname.uri()
+                    return Ok(self_qname.uri(activation.strings())
+                        == other_qname.uri(activation.strings())
                         && self_qname.local_name() == other_qname.local_name());
                 }
             }
 
             if let Some(self_ns) = obj.as_namespace_object() {
                 if let Value::Object(Object::NamespaceObject(other_ns)) = other {
-                    return Ok(self_ns.namespace().as_uri() == other_ns.namespace().as_uri());
+                    return Ok(self_ns.namespace().as_uri(activation.strings())
+                        == other_ns.namespace().as_uri(activation.strings()));
                 }
             }
         }

@@ -1,9 +1,11 @@
 use crate::backends::{
-    CpalAudioBackend, DesktopExternalInterfaceProvider, DesktopFSCommandProvider, DesktopUiBackend,
-    RfdNavigatorInterface,
+    DesktopExternalInterfaceProvider, DesktopFSCommandProvider, DesktopNavigatorInterface,
+    DesktopUiBackend,
 };
+use crate::cli::FilesystemAccessMode;
+use crate::cli::GameModePreference;
 use crate::custom_event::RuffleEvent;
-use crate::gui::MovieView;
+use crate::gui::{FilePicker, MovieView};
 use crate::preferences::GlobalPreferences;
 use crate::{CALLSTACK, RENDER_INFO, SWF_INFO};
 use anyhow::anyhow;
@@ -11,6 +13,7 @@ use ruffle_core::backend::navigator::{OpenURLMode, SocketMode};
 use ruffle_core::config::Letterbox;
 use ruffle_core::events::{GamepadButton, KeyCode};
 use ruffle_core::{DefaultFont, LoadBehavior, Player, PlayerBuilder, PlayerEvent};
+use ruffle_frontend_utils::backends::audio::CpalAudioBackend;
 use ruffle_frontend_utils::backends::executor::{AsyncExecutor, PollRequester};
 use ruffle_frontend_utils::backends::navigator::ExternalNavigatorBackend;
 use ruffle_frontend_utils::bundle::source::BundleSourceError;
@@ -21,6 +24,7 @@ use ruffle_frontend_utils::recents::Recent;
 use ruffle_render::backend::RenderBackend;
 use ruffle_render::quality::StageQuality;
 use ruffle_render_wgpu::backend::WgpuRenderBackend;
+use ruffle_render_wgpu::clap::PowerPreference;
 use ruffle_render_wgpu::descriptors::Descriptors;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -43,7 +47,9 @@ pub struct LaunchOptions {
     pub tcp_connections: Option<SocketMode>,
     pub fullscreen: bool,
     pub save_directory: PathBuf,
+    pub cache_directory: PathBuf,
     pub open_url_mode: OpenURLMode,
+    pub filesystem_access_mode: FilesystemAccessMode,
     pub gamepad_button_mapping: HashMap<GamepadButton, KeyCode>,
     pub avm2_optimizer_enabled: bool,
 }
@@ -90,7 +96,9 @@ impl From<&GlobalPreferences> for LaunchOptions {
             proxy: value.cli.proxy.clone(),
             fullscreen: value.cli.fullscreen,
             save_directory: value.cli.save_directory.clone(),
+            cache_directory: value.cli.cache_directory.clone(),
             open_url_mode: value.cli.open_url_mode,
+            filesystem_access_mode: value.cli.filesystem_access_mode,
             socket_allowed: HashSet::from_iter(value.cli.socket_allow.iter().cloned()),
             tcp_connections: value.cli.tcp_connections,
             gamepad_button_mapping: HashMap::from_iter(value.cli.gamepad_button.iter().cloned()),
@@ -115,6 +123,9 @@ impl PollRequester for WinitWaker {
 struct ActivePlayer {
     player: Arc<Mutex<Player>>,
     executor: Arc<AsyncExecutor<WinitWaker>>,
+
+    #[cfg(target_os = "linux")]
+    _gamemode_session: crate::dbus::GameModeSession,
 }
 
 impl ActivePlayer {
@@ -128,10 +139,11 @@ impl ActivePlayer {
         movie_view: MovieView,
         font_database: Rc<fontdb::Database>,
         preferences: GlobalPreferences,
+        file_picker: FilePicker,
     ) -> Self {
         let mut builder = PlayerBuilder::new();
 
-        match CpalAudioBackend::new(&preferences) {
+        match CpalAudioBackend::new(preferences.output_device_name().as_deref()) {
             Ok(audio) => {
                 builder = builder.with_audio(audio);
             }
@@ -193,7 +205,9 @@ impl ActivePlayer {
                     tcp_connections: opt.tcp_connections,
                     fullscreen: opt.fullscreen,
                     save_directory: opt.save_directory.clone(),
+                    cache_directory: opt.cache_directory.clone(),
                     open_url_mode: opt.open_url_mode,
+                    filesystem_access_mode: opt.filesystem_access_mode,
                     gamepad_button_mapping: opt.gamepad_button_mapping.clone(),
                     avm2_optimizer_enabled: opt.avm2_optimizer_enabled,
                 })
@@ -217,23 +231,30 @@ impl ActivePlayer {
             opt.socket_allowed.clone(),
             opt.tcp_connections.unwrap_or(SocketMode::Ask),
             Rc::new(content),
-            RfdNavigatorInterface,
+            DesktopNavigatorInterface::new(
+                event_loop.clone(),
+                movie_url.to_file_path().ok(),
+                opt.filesystem_access_mode,
+            ),
         );
 
         if cfg!(feature = "external_video") && preferences.openh264_enabled() {
             #[cfg(feature = "external_video")]
             {
-                use ruffle_video_external::backend::ExternalVideoBackend;
-                let path = tokio::task::block_in_place(ExternalVideoBackend::get_openh264);
-                let openh264_path = match path {
-                    Ok(path) => Some(path),
+                use ruffle_video_external::{
+                    backend::ExternalVideoBackend, decoder::openh264::OpenH264Codec,
+                };
+                let openh264 = tokio::task::block_in_place(|| {
+                    OpenH264Codec::load(&opt.cache_directory.join("video"))
+                });
+                let backend = match openh264 {
+                    Ok(codec) => ExternalVideoBackend::new_with_openh264(codec),
                     Err(e) => {
-                        tracing::error!("Couldn't get OpenH264: {}", e);
-                        None
+                        tracing::error!("Failed to load OpenH264: {}", e);
+                        ExternalVideoBackend::new()
                     }
                 };
-
-                builder = builder.with_video(ExternalVideoBackend::new(openh264_path));
+                builder = builder.with_video(backend);
             }
         } else {
             #[cfg(feature = "software_video")]
@@ -242,6 +263,20 @@ impl ActivePlayer {
                     builder.with_video(ruffle_video_software::backend::SoftwareVideoBackend::new());
             }
         }
+
+        #[cfg_attr(not(target_os = "linux"), allow(unused))]
+        let gamemode_enable = match preferences.gamemode_preference() {
+            GameModePreference::Default => {
+                preferences.graphics_power_preference() == PowerPreference::High
+            }
+            GameModePreference::On => {
+                if cfg!(not(target_os = "linux")) {
+                    tracing::warn!("Cannot enable GameMode, as it is supported only on Linux");
+                }
+                true
+            }
+            GameModePreference::Off => false,
+        };
 
         let renderer = WgpuRenderBackend::new(descriptors, movie_view)
             .map_err(|e| anyhow!(e.to_string()))
@@ -268,9 +303,11 @@ impl ActivePlayer {
             .with_ui(
                 DesktopUiBackend::new(
                     window.clone(),
+                    event_loop.clone(),
                     opt.open_url_mode,
                     font_database,
                     preferences,
+                    file_picker,
                 )
                 .expect("Couldn't create ui backend"),
             )
@@ -371,7 +408,12 @@ impl ActivePlayer {
             );
         }
 
-        Self { player, executor }
+        Self {
+            player,
+            executor,
+            #[cfg(target_os = "linux")]
+            _gamemode_session: crate::dbus::GameModeSession::new(gamemode_enable),
+        }
     }
 }
 
@@ -384,6 +426,7 @@ pub struct PlayerController {
     descriptors: Arc<Descriptors>,
     font_database: Rc<fontdb::Database>,
     preferences: GlobalPreferences,
+    file_picker: FilePicker,
 }
 
 impl PlayerController {
@@ -393,6 +436,7 @@ impl PlayerController {
         descriptors: Arc<Descriptors>,
         font_database: fontdb::Database,
         preferences: GlobalPreferences,
+        file_picker: FilePicker,
     ) -> Self {
         Self {
             player: None,
@@ -401,6 +445,7 @@ impl PlayerController {
             descriptors,
             font_database: Rc::new(font_database),
             preferences,
+            file_picker,
         }
     }
 
@@ -414,6 +459,7 @@ impl PlayerController {
             movie_view,
             self.font_database.clone(),
             self.preferences.clone(),
+            self.file_picker.clone(),
         ));
     }
 

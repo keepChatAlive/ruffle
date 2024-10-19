@@ -13,7 +13,7 @@ use crate::display_object::{
 };
 use crate::ecma_conversions::{f64_to_wrapping_i32, f64_to_wrapping_u32};
 use crate::loader::MovieLoaderVMData;
-use crate::string::{AvmString, SwfStrExt as _, WStr, WString};
+use crate::string::{AvmString, StringContext, SwfStrExt as _, WStr, WString};
 use crate::tag_utils::SwfSlice;
 use crate::vminterface::Instantiator;
 use crate::{avm_error, avm_warn};
@@ -45,7 +45,7 @@ macro_rules! avm_debug {
 #[derive(Clone)]
 pub struct RegisterSet<'gc>(SmallVec<[Value<'gc>; 8]>);
 
-unsafe impl<'gc> gc_arena::Collect for RegisterSet<'gc> {
+unsafe impl gc_arena::Collect for RegisterSet<'_> {
     #[inline]
     fn trace(&self, cc: &gc_arena::Collection) {
         for register in &self.0 {
@@ -239,8 +239,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// Convenience method to retrieve the current GC context. Note that explicitly writing
     /// `self.context.gc_context` can be sometimes necessary to satisfy the borrow checker.
     #[inline(always)]
-    pub fn gc(&self) -> &'gc gc_arena::Mutation<'gc> {
+    pub fn gc(&self) -> &'gc Mutation<'gc> {
         self.context.gc_context
+    }
+
+    #[inline(always)]
+    pub fn strings(&mut self) -> &mut StringContext<'gc> {
+        &mut self.context.strings
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -821,7 +826,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let object = object_val.coerce_to_object(self);
 
         let method_name = if method_name == Value::Undefined {
-            "".into()
+            self.strings().empty()
         } else {
             method_name.coerce_to_string(self)?
         };
@@ -863,15 +868,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         &mut self,
         action: ConstantPool,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
+        let encoding = self.encoding();
         let constants = action
             .strings
             .iter()
-            .map(|s| {
-                self.context
-                    .interner
-                    .intern_wstr(self.context.gc_context, s.decode(self.encoding()))
-                    .into()
-            })
+            .map(|s| self.strings().intern_wstr(s.decode(encoding)).into())
             .collect();
 
         self.context
@@ -1721,7 +1722,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let object = object_val.coerce_to_object(self);
 
         let method_name = if method_name == Value::Undefined {
-            "".into()
+            self.strings().empty()
         } else {
             method_name.coerce_to_string(self)?
         };

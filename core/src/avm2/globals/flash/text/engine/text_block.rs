@@ -15,6 +15,7 @@ pub fn create_text_line<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let namespaces = activation.avm2().namespaces;
     avm2_stub_method!(activation, "flash.text.TextBlock", "createTextLine");
 
     let previous_text_line = args.try_get_object(activation, 0);
@@ -34,7 +35,7 @@ pub fn create_text_line<'gc>(
             // TODO: Support multiple lines
             this.set_property(
                 &Multiname::new(
-                    activation.avm2().flash_text_engine_internal,
+                    namespaces.flash_text_engine_internal,
                     "_textLineCreationResult",
                 ),
                 "complete".into(),
@@ -47,7 +48,7 @@ pub fn create_text_line<'gc>(
         None => {
             let txt = content
                 .get_public_property("text", activation)
-                .unwrap_or("".into());
+                .unwrap_or_else(|_| activation.strings().empty().into());
 
             if matches!(txt, Value::Null) {
                 // FP returns a null TextLine when `o` is null- note that
@@ -80,35 +81,29 @@ pub fn create_text_line<'gc>(
     apply_format(activation, display_object, text.as_wstr(), element_format)?;
 
     let instance = initialize_for_allocator(activation, display_object.into(), class)?;
-    class.call_native_init(instance.into(), &[], activation)?;
+    class.call_super_init(instance.into(), &[], activation)?;
 
     instance.set_property(
-        &Multiname::new(activation.avm2().flash_text_engine_internal, "_textBlock"),
+        &Multiname::new(namespaces.flash_text_engine_internal, "_textBlock"),
         this.into(),
         activation,
     )?;
 
     instance.set_property(
-        &Multiname::new(
-            activation.avm2().flash_text_engine_internal,
-            "_specifiedWidth",
-        ),
+        &Multiname::new(namespaces.flash_text_engine_internal, "_specifiedWidth"),
         args.get_value(1),
         activation,
     )?;
 
     instance.set_property(
-        &Multiname::new(
-            activation.avm2().flash_text_engine_internal,
-            "_rawTextLength",
-        ),
+        &Multiname::new(namespaces.flash_text_engine_internal, "_rawTextLength"),
         text.len().into(),
         activation,
     )?;
 
     this.set_property(
         &Multiname::new(
-            activation.avm2().flash_text_engine_internal,
+            namespaces.flash_text_engine_internal,
             "_textLineCreationResult",
         ),
         "success".into(),
@@ -116,7 +111,7 @@ pub fn create_text_line<'gc>(
     )?;
 
     this.set_property(
-        &Multiname::new(activation.avm2().flash_text_engine_internal, "_firstLine"),
+        &Multiname::new(namespaces.flash_text_engine_internal, "_firstLine"),
         instance.into(),
         activation,
     )?;

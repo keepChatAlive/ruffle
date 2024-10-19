@@ -278,6 +278,7 @@ impl<'gc> Timers<'gc> {
         if let Some(mut timer) = timer {
             self.remove(id);
             timer.interval = interval;
+            timer.tick_time = self.cur_time + interval;
             self.timers.push(timer);
         } else {
             panic!("Changing delay of non-existent timer");
@@ -303,7 +304,7 @@ impl Default for Timers<'_> {
     }
 }
 
-unsafe impl<'gc> Collect for Timers<'gc> {
+unsafe impl Collect for Timers<'_> {
     fn trace(&self, cc: &gc_arena::Collection) {
         for timer in &self.timers {
             timer.trace(cc);

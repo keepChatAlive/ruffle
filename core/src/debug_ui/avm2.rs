@@ -240,7 +240,8 @@ impl Avm2ObjectWindow {
                 let name = definition.name();
 
                 ui.label("Namespace");
-                ui.text_edit_singleline(&mut name.namespace().as_uri().to_string().as_str());
+                let namespace = name.namespace().as_uri(activation.strings());
+                ui.text_edit_singleline(&mut namespace.to_string().as_str());
                 ui.end_row();
 
                 ui.label("Name");
@@ -364,13 +365,16 @@ impl Avm2ObjectWindow {
                     label_col(&mut row);
                     row.col(|ui| {
                         let value = object.get_slot(slot_id);
-                        ValueResultWidget::new(activation, value).show(ui, messages);
+                        ValueResultWidget::new(activation, Ok(value)).show(ui, messages);
                     });
                     row.col(|_| {});
                 });
             }
             Property::Virtual { get: Some(get), .. } => {
-                let key = (ns.as_uri().to_string(), name.to_string());
+                let key = (
+                    ns.as_uri(activation.strings()).to_string(),
+                    name.to_string(),
+                );
                 body.row(18.0, |mut row| {
                     label_col(&mut row);
                     row.col(|ui| {

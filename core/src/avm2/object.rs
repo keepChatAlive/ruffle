@@ -16,12 +16,11 @@ use crate::avm2::vtable::{ClassBoundMethod, VTable};
 use crate::avm2::Error;
 use crate::avm2::Multiname;
 use crate::avm2::Namespace;
-use crate::avm2::QName;
 use crate::bitmap::bitmap_data::BitmapDataWrapper;
 use crate::display_object::DisplayObject;
 use crate::html::TextFormat;
 use crate::streams::NetStream;
-use crate::string::AvmString;
+use crate::string::{AvmString, StringContext};
 use gc_arena::{Collect, Gc, Mutation};
 use ruffle_macros::enum_trait_object;
 use std::cell::{Ref, RefMut};
@@ -243,7 +242,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     ) -> Result<Value<'gc>, Error<'gc>> {
         match self.vtable().get_trait(multiname) {
             Some(Property::Slot { slot_id }) | Some(Property::ConstSlot { slot_id }) => {
-                self.base().get_slot(slot_id)
+                Ok(self.base().get_slot(slot_id))
             }
             Some(Property::Method { disp_id }) => {
                 // avmplus has a special case for XML and XMLList objects, so we need one as well
@@ -270,14 +269,12 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
             Some(Property::Virtual { get: Some(get), .. }) => {
                 self.call_method(get, &[], activation)
             }
-            Some(Property::Virtual { get: None, .. }) => {
-                return Err(error::make_reference_error(
-                    activation,
-                    error::ReferenceErrorCode::ReadFromWriteOnly,
-                    multiname,
-                    self.instance_class(),
-                ));
-            }
+            Some(Property::Virtual { get: None, .. }) => Err(error::make_reference_error(
+                activation,
+                error::ReferenceErrorCode::ReadFromWriteOnly,
+                multiname,
+                self.instance_class(),
+            )),
             None => self.get_property_local(multiname, activation),
         }
     }
@@ -326,7 +323,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<(), Error<'gc>> {
-        let name = Multiname::new(activation.avm2().public_namespace_vm_internal, name);
+        let name = Multiname::new(activation.avm2().namespaces.public_vm_internal(), name);
         self.set_property_local(&name, value, activation)
     }
 
@@ -349,8 +346,11 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
                 let value = self
                     .vtable()
                     .coerce_trait_value(slot_id, value, activation)?;
+
                 self.base()
-                    .set_slot(slot_id, value, activation.context.gc_context)
+                    .set_slot(slot_id, value, activation.context.gc_context);
+
+                Ok(())
             }
             Some(Property::Method { .. }) => {
                 // Similar to the get_property special case for XML/XMLList.
@@ -360,23 +360,23 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
                     return self.set_property_local(multiname, value, activation);
                 }
 
-                return Err(error::make_reference_error(
+                Err(error::make_reference_error(
                     activation,
                     error::ReferenceErrorCode::AssignToMethod,
                     multiname,
                     self.instance_class(),
-                ));
+                ))
             }
             Some(Property::Virtual { set: Some(set), .. }) => {
                 self.call_method(set, &[value], activation).map(|_| ())
             }
             Some(Property::ConstSlot { .. }) | Some(Property::Virtual { set: None, .. }) => {
-                return Err(error::make_reference_error(
+                Err(error::make_reference_error(
                     activation,
                     error::ReferenceErrorCode::WriteToReadOnly,
                     multiname,
                     self.instance_class(),
-                ));
+                ))
             }
             None => self.set_property_local(multiname, value, activation),
         }
@@ -390,11 +390,8 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<(), Error<'gc>> {
-        self.set_property(
-            &Multiname::new(activation.avm2().public_namespace_vm_internal, name),
-            value,
-            activation,
-        )
+        let name = Multiname::new(activation.avm2().namespaces.public_vm_internal(), name);
+        self.set_property(&name, value, activation)
     }
 
     /// Init a local property of the object. The Multiname should always be public.
@@ -432,28 +429,27 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
                 let value = self
                     .vtable()
                     .coerce_trait_value(slot_id, value, activation)?;
+
                 self.base()
-                    .set_slot(slot_id, value, activation.context.gc_context)
+                    .set_slot(slot_id, value, activation.context.gc_context);
+
+                Ok(())
             }
-            Some(Property::Method { .. }) => {
-                return Err(error::make_reference_error(
-                    activation,
-                    error::ReferenceErrorCode::AssignToMethod,
-                    multiname,
-                    self.instance_class(),
-                ));
-            }
+            Some(Property::Method { .. }) => Err(error::make_reference_error(
+                activation,
+                error::ReferenceErrorCode::AssignToMethod,
+                multiname,
+                self.instance_class(),
+            )),
             Some(Property::Virtual { set: Some(set), .. }) => {
                 self.call_method(set, &[value], activation).map(|_| ())
             }
-            Some(Property::Virtual { set: None, .. }) => {
-                return Err(error::make_reference_error(
-                    activation,
-                    error::ReferenceErrorCode::WriteToReadOnly,
-                    multiname,
-                    self.instance_class(),
-                ));
-            }
+            Some(Property::Virtual { set: None, .. }) => Err(error::make_reference_error(
+                activation,
+                error::ReferenceErrorCode::WriteToReadOnly,
+                multiname,
+                self.instance_class(),
+            )),
             None => self.init_property_local(multiname, value, activation),
         }
     }
@@ -497,7 +493,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     ) -> Result<Value<'gc>, Error<'gc>> {
         match self.vtable().get_trait(multiname) {
             Some(Property::Slot { slot_id }) | Some(Property::ConstSlot { slot_id }) => {
-                let obj = self.base().get_slot(slot_id)?.as_callable(
+                let obj = self.base().get_slot(slot_id).as_callable(
                     activation,
                     Some(multiname),
                     Some(Value::from(self.into())),
@@ -517,14 +513,12 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
 
                 obj.call(Value::from(self.into()), arguments, activation)
             }
-            Some(Property::Virtual { get: None, .. }) => {
-                return Err(error::make_reference_error(
-                    activation,
-                    error::ReferenceErrorCode::ReadFromWriteOnly,
-                    multiname,
-                    self.instance_class(),
-                ));
-            }
+            Some(Property::Virtual { get: None, .. }) => Err(error::make_reference_error(
+                activation,
+                error::ReferenceErrorCode::ReadFromWriteOnly,
+                multiname,
+                self.instance_class(),
+            )),
             None => self.call_property_local(multiname, arguments, activation),
         }
     }
@@ -546,7 +540,8 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
 
     /// Retrieve a slot by its index.
     #[no_dynamic]
-    fn get_slot(self, id: u32) -> Result<Value<'gc>, Error<'gc>> {
+    #[inline(always)]
+    fn get_slot(self, id: u32) -> Value<'gc> {
         let base = self.base();
 
         base.get_slot(id)
@@ -563,19 +558,16 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         let value = self.vtable().coerce_trait_value(id, value, activation)?;
         let base = self.base();
 
-        base.set_slot(id, value, activation.gc())
+        base.set_slot(id, value, activation.gc());
+
+        Ok(())
     }
 
     #[no_dynamic]
-    fn set_slot_no_coerce(
-        self,
-        id: u32,
-        value: Value<'gc>,
-        mc: &Mutation<'gc>,
-    ) -> Result<(), Error<'gc>> {
+    fn set_slot_no_coerce(self, id: u32, value: Value<'gc>, mc: &Mutation<'gc>) {
         let base = self.base();
 
-        base.set_slot(id, value, mc)
+        base.set_slot(id, value, mc);
     }
 
     /// Call a method by its index.
@@ -745,7 +737,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         activation: &mut Activation<'_, 'gc>,
         name: impl Into<AvmString<'gc>>,
     ) -> Result<bool, Error<'gc>> {
-        let name = Multiname::new(activation.avm2().public_namespace_base_version, name);
+        let name = Multiname::new(activation.avm2().namespaces.public_all(), name);
         self.delete_property(activation, &name)
     }
 
@@ -858,28 +850,6 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         let base = self.base();
 
         base.install_bound_method(mc, disp_id, function)
-    }
-
-    /// Install a const trait on the global object.
-    /// This should only ever be called on the `global` object, during initialization.
-    #[no_dynamic]
-    fn install_const_late(
-        &self,
-        mc: &Mutation<'gc>,
-        name: QName<'gc>,
-        value: Value<'gc>,
-        class: Class<'gc>,
-    ) {
-        let new_slot_id = self
-            .vtable()
-            .install_const_trait_late(mc, name, value, class);
-
-        self.base().install_const_slot_late(mc, new_slot_id, value);
-    }
-
-    #[no_dynamic]
-    fn install_instance_slots(&self, mc: &Mutation<'gc>) {
-        self.base().install_instance_slots(mc);
     }
 
     /// Call the object.
@@ -1009,7 +979,12 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
     ///
     /// `valueOf` is a method used to request an object be coerced to a
     /// primitive value. Typically, this would be a number of some kind.
-    fn value_of(&self, mc: &Mutation<'gc>) -> Result<Value<'gc>, Error<'gc>>;
+    ///
+    /// The default implementation wraps the object in a `Value`, using the
+    /// `Into<Object<'gc>>` implementation.
+    fn value_of(&self, _context: &mut StringContext<'gc>) -> Result<Value<'gc>, Error<'gc>> {
+        Ok(Value::Object((*self).into()))
+    }
 
     /// Determine if this object is an instance of a given type.
     ///
@@ -1052,7 +1027,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
         for (name, prop) in vtable.public_properties() {
             match prop {
                 Property::Slot { slot_id } | Property::ConstSlot { slot_id } => {
-                    values.push((name, self.base().get_slot(slot_id)?));
+                    values.push((name, self.base().get_slot(slot_id)));
                 }
                 Property::Virtual { get: Some(get), .. } => {
                     values.push((name, self.call_method(get, &[], activation)?))
@@ -1440,15 +1415,15 @@ impl<'gc> Object<'gc> {
     }
 }
 
-impl<'gc> PartialEq for Object<'gc> {
+impl PartialEq for Object<'_> {
     fn eq(&self, other: &Self) -> bool {
         Object::ptr_eq(*self, *other)
     }
 }
 
-impl<'gc> Eq for Object<'gc> {}
+impl Eq for Object<'_> {}
 
-impl<'gc> Hash for Object<'gc> {
+impl Hash for Object<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.as_ptr().hash(state);
     }
